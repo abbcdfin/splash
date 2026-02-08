@@ -1,0 +1,18 @@
+#+TITLE: Index of information required for vibe coding of project Splash
+
+* specification
+The specification of this project is in ./README.org
+
+* implementation plan
+Please use ./implementation-plan.org as the interactive design board. You can generate the plan and I will update based on my understanding, so this can be used as a proper plan for later work.
+
+* tasks
+Please use ./tasks.org as the interactive progressing board. You can generate the detailed tasks from the implentation plan and I will update based on my understanding. I will decided how to progress with the tasks. Also, you will take notes on the progress so we understand where we are and can pick up the progress at a later stage.
+
+* understanding
++ ./display_framework_summary.md is the current understanding of the linux mipi dis driver system. which can help you backporting the existing driver to u-boot.
+
+* work environment
+The work space of this project is /home/jian/Download/splash
+
+This is a embedded software project. Please source /home/jian/.scripts/setup-oe.sh, it will setup the bash environment for cross compiling.
