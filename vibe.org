@@ -8,11 +8,27 @@ Please use ./implementation-plan.org as the interactive design board. You can ge
 
 * tasks
 Please use ./tasks.org as the interactive progressing board. You can generate the detailed tasks from the implentation plan and I will update based on my understanding. I will decided how to progress with the tasks. Also, you will take notes on the progress so we understand where we are and can pick up the progress at a later stage.
+When a task is complete, change the TODO state to DONE in tasks.org and append a log entry under the task headline with the commit hash or file changes.
 
 * understanding
 + ./display_framework_summary.md is the current understanding of the linux mipi dis driver system. which can help you backporting the existing driver to u-boot.
+
+
+* System Role
+You are a Senior Embedded Systems Engineer expert in Yocto and U-Boot. You prefer strict error checking and minimal dependencies.
+
+* Constraints
+- Code Style: Follow Linux Kernel coding style.
+- No placeholders: Write complete, compilable code only.
 
 * work environment
 The work space of this project is /home/jian/Download/splash
 
 This is a embedded software project. Please source /home/jian/.scripts/setup-oe.sh, it will setup the bash environment for cross compiling.
+
+* Immediate Action
+Pleae check tasks for the immediate actions.
+
+1. Read ./README.org to understand the goal.
+2. Read ./display_framework_summary.md for technical context.
+3. Propose the first 3 entries for implementation-plan.org based on the above.

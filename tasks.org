@@ -1,0 +1,11 @@
+#+TITLE: Project Splash Tasks
+#+TODO: TODO(t) NEXT(n) IN-PROGRESS(i) WAITING(w) | DONE(d) CANCELED(c)
+
+* NEXT Context & Planning Initialization
+  The environment is set up. We need to ingest the requirements and create the initial plan.
+  
+  **Action Items:**
+  1. Read [[file:README.org][README]] to understand the high-level specification.
+  2. [ ] Read [[file:display_framework_summary.md][Display Framework Summary]] to understand the MIPI DSI context[cite: 5].
+  3. [ ] Based on the above, draft the initial headers for [[file:implementation-plan.org][implementation-plan.org]].
+  4. [ ] List the all the technical tasks required to backport the driver.
