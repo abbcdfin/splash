@@ -4,52 +4,29 @@
 #+STARTUP: showall
 
 * Overview
-The goal of Project Splash is to enable a boot-time splash screen for the Allwinner T113-S platform within U-Boot (v2026.04). This requires back-porting the MIPI DSI display stack from Linux v6.10 to the U-Boot driver model.
+The goal of Project Splash is to enable a boot-time splash screen for the Allwinner T113-S platform within U-Boot (mainline, targeting v2026.04). This requires back-porting the MIPI DSI display stack from Linux v6.10 to the U-Boot driver model.
 
-* Hardware Context
+* System Context
 - **SoC:** Allwinner T113-S
-- **Board:** sun8i-t113s-raft-gw-argon-vb
+- **Board:** raft-gw-argon-vb
+- **DTS:** sun8i-t113s-raft-gw-argon-vb.dts
 - **Display Pipe:** DE2.0 (Display Engine) -> TCON_TOP -> DSI Controller -> D-PHY -> LCD Panel
-- **Current State:** U-Boot currently supports LCD output via LVDS on this SoC; this project pivots that output to MIPI DSI.
+- **Current State:** U-Boot currently supports LCD output via LVDS on this SoC; Linux currently supports LCD output via MIPI DSI; this project pivots that output to MIPI DSI in u-boot.
+
+* design approach
+Use agentic AI system to perform the back-porting.
 
 * Technical Source Material
+
 ** Linux v6.10 Driver Sources
-The following drivers from the Linux v6.10 kernel are the primary references for the port:
-- DSI Controller: ~drivers/gpu/drm/sun4i/sun6i_mipi_dsi.c~
-- MIPI D-PHY: ~drivers/phy/allwinner/phy-sun6i-mipi-dphy.c~
-- SoC Specifics: ~drivers/gpu/drm/sun4i/sun8i_tcon_top.c~
+Linux v6.10 souce code should be copied into the project as linux subdirectory, as we don't need to modify its code.
 
 ** U-Boot v2026.04 Target
-The implementation must adhere to the U-Boot Driver Model (DM):
-- Video Class: ~drivers/video/video-uclass.c~
-- DSI Host Class: ~drivers/video/mipi_dsi.c~
-- Sunxi Video: ~drivers/video/sunxi/sunxi_de2.c~
-
-* Project Tasks [0/4]
-** TODO Phase 1: Device Tree Integration
-- [ ] Integrate ~sun8i-t113s-raft-gw-argon-vb.dts~ into U-Boot.
-- [ ] Add required ~u-boot,dm-pre-reloc~ properties to ~&dsi~, ~&dphy~, and ~&tcon_top~.
-- [ ] Verify node binding using ~dm tree~ in U-Boot console.
-
-** TODO Phase 2: D-PHY & TCON_TOP Adaption
-- [ ] Port D-PHY initialization logic for T113-S.
-- [ ] Ensure ~tcon_top~ correctly gates the DSI clock (~CLK_TCON_TOP_DSI~).
-- [ ] Implement PHY power-on/off sequences for High-Speed (HS) and Low-Power (LP) modes.
-
-** TODO Phase 3: DSI Controller Porting
-- [ ] Adapt ~sun6i_mipi_dsi.c~ to U-Boot's ~video_bridge~ ops.
-- [ ] Implement DCS (Display Command Set) packet transmission for panel initialization.
-- [ ] Match timing calculations from Linux v6.10 for the MIPI bit clock.
-
-** TODO Phase 4: Splash Screen Enablement
-- [ ] Enable ~CONFIG_VIDEO~, ~CONFIG_VIDEO_SUNXI~, and ~CONFIG_VIDEO_MIPI_DSI~.
-- [ ] Implement ~board_video_skip~ to trigger panel init sequence.
-- [ ] Test bitmap rendering from MMC using ~bmp display~.
+u-boot mainline (targeting v2026.4 release) is included in this repository as a git submodule u-boot.
 
 * Implementation Constraints
 - Use concise, professional C code adhering to U-Boot coding style.
-- Prioritize minimal memory footprint for SPL compatibility if possible.
-- Avoid DRM-specific structures; use ~struct video_priv~ and ~struct video_uc_plat~.
+- Transform the implementation from Linux kernel to suit U-Boot's driver framework.
 
 * Success Criteria
 - [ ] U-Boot successfully probes the MIPI DSI controller.
