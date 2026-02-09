@@ -12,32 +12,37 @@ This plan outlines the steps to enable MIPI DSI splash screen support for the Al
 ### 2. Implement `sun8i_tcon_top` Driver
 - Task: Port minimal TCON_TOP driver.
 - Goal: Enable routing from Mixer 0 to TCON LCD 0.
-- Status: STARTED. Skeleton created in `sun8i_tcon_top.c`.
+- Status: STARTED. Skeleton created in `sun8i_tcon_top.c`. Basic routing added to `sunxi_de2.c`.
 
 ### 3. Implement `sun6i_mipi_dsi` Controller Driver
 - Task: Port MIPI DSI controller driver.
 - Goal: Support DSI host initialization and basic DSI packet transfers.
 - Status: STARTED. Skeleton created in `sun6i_mipi_dsi.c`.
 
+### 4. Update Device Tree
+- Task: Sync all relevant DTS/DTSI files from Linux to U-Boot `dts/upstream`.
+- Goal: Ensure all display components and panel are defined exactly as in Linux.
+- Status: DONE.
+
 ## Phase 2: Driver Logic Implementation
 
-### 4. Implement Clock and Reset Initialization
+### 5. Implement Clock and Reset Initialization
 - Task: Implement T113 specific clock setup in `sunxi_de2_composer_init` within `sunxi_de2.c`.
 - Goal: Enable DE, TCON, DSI clocks in CCU.
-- Status: TODO
+- Status: DONE.
 
-### 5. Implement DSI and PHY Logic
+### 6. Implement DSI and PHY Logic
 - Task: Implement register programming for DSI and D-PHY.
 - Goal: Bring up the DSI link.
 - Status: TODO
 
-### 6. Port ILI9881C Panel Driver
+### 7. Port ILI9881C Panel Driver
 - Task: Port `drivers/gpu/drm/panel/panel-ilitek-ili9881c.c` from Linux.
 - Goal: Implement the `hd50004c30` initialization sequence.
 - Status: TODO
 
 ## Phase 3: Integration and Verification
 
-### 7. Splash Screen Enablement and Testing
+### 8. Splash Screen Enablement and Testing
 - Task: Configure U-Boot to use the new display path for the splash screen.
 - Status: TODO

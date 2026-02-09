@@ -2,9 +2,9 @@
 
 * DONE Phase 1: Infrastructure and Core Drivers
 ** DONE Analyze T113-S display path in U-Boot [3/3]
-- [X] Check `sunxi_de2.c` probe sequence.
-- [X] Check `sunxi_lcd.c` (TCON) compatibility with T113-S.
-- [X] Map out the required clock and reset IDs for TCON_TOP and DSI.
+- [X] Check `sunxi_de2.c` probe sequence. (Decided to use sunxi_de2_t113.c)
+- [X] Check `sunxi_lcd.c` (TCON) compatibility with T113-S. (Decided to use sunxi_de2_t113.c logic)
+- [X] Map out the required clock and reset IDs for TCON_TOP and DSI. (Added to headers)
 CLOSED: [2026-02-09 Mon]
 
 ** DONE Implement sun8i_tcon_top driver
@@ -24,10 +24,16 @@ CLOSED: [2026-02-09 Mon]
 - [X] Fix build errors and warnings.
 CLOSED: [2026-02-09 Mon]
 
+** DONE Update Device Tree [2/2]
+- [X] Sync board DTS `sun8i-t113s-raft-gw-argon-vb.dts` with Linux version.
+- [X] Sync SoC DTSI files (`sun8i-t113s.dtsi`, `sunxi-d1s-t113.dtsi`, `sunxi-d1-t113.dtsi`) with Linux version.
+CLOSED: [2026-02-09 Mon]
+
 * TODO Phase 2: Driver Logic Implementation
-** TODO Implement Clock and Reset Logic [0/2]
-- [ ] Implement `sunxi_de2_composer_init` for T113 in `sunxi_de2.c`.
-- [ ] Verify offsets and values against datasheet/Linux.
+** DONE Implement Clock and Reset Logic [2/2]
+- [X] Implement `sunxi_de2_composer_init` for T113 in `sunxi_de2.c`.
+- [X] Verify offsets and values against datasheet/Linux.
+CLOSED: [2026-02-09 Mon]
 
 ** TODO Implement DSI Controller Logic [0/2]
 - [ ] Implement `sun6i_mipi_dsi_enable` to configure DSI registers.
