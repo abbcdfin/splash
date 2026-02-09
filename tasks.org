@@ -1,11 +1,46 @@
-#+TITLE: Project Splash Tasks
-#+TODO: TODO(t) NEXT(n) IN-PROGRESS(i) WAITING(w) | DONE(d) CANCELED(c)
+# Tasks - Project Splash
 
-* NEXT Context & Planning Initialization
-  The environment is set up. We need to ingest the requirements and create the initial plan.
-  
-  **Action Items:**
-  1. Read [[file:README.org][README]] to understand the high-level specification.
-  2. [ ] Read [[file:display_framework_summary.md][Display Framework Summary]] to understand the MIPI DSI context[cite: 5].
-  3. [ ] Based on the above, draft the initial headers for [[file:implementation-plan.org][implementation-plan.org]].
-  4. [ ] List the all the technical tasks required to backport the driver.
+* DONE Phase 1: Infrastructure and Core Drivers
+** DONE Analyze T113-S display path in U-Boot [3/3]
+- [X] Check `sunxi_de2.c` probe sequence.
+- [X] Check `sunxi_lcd.c` (TCON) compatibility with T113-S.
+- [X] Map out the required clock and reset IDs for TCON_TOP and DSI.
+CLOSED: [2026-02-09 Mon]
+
+** DONE Implement sun8i_tcon_top driver
+- [X] Create `drivers/video/sunxi/sun8i_tcon_top.c`.
+- [X] Implement basic routing logic. (Skeleton created)
+CLOSED: [2026-02-09 Mon]
+
+** DONE Implement sun6i_mipi_dsi driver
+- [X] Create `drivers/video/sunxi/sun6i_mipi_dsi.c`.
+- [X] Implement `dsi_host` uclass ops. (Skeleton created)
+CLOSED: [2026-02-09 Mon]
+
+** DONE Enable Drivers in Build
+- [X] Merge `sunxi_de2_t113.c` logic back into `sunxi_de2.c`.
+- [X] Add `VIDEO_SUNXI_T113` Kconfig.
+- [X] Update Makefile.
+- [X] Fix build errors and warnings.
+CLOSED: [2026-02-09 Mon]
+
+* TODO Phase 2: Driver Logic Implementation
+** TODO Implement Clock and Reset Logic [0/2]
+- [ ] Implement `sunxi_de2_composer_init` for T113 in `sunxi_de2.c`.
+- [ ] Verify offsets and values against datasheet/Linux.
+
+** TODO Implement DSI Controller Logic [0/2]
+- [ ] Implement `sun6i_mipi_dsi_enable` to configure DSI registers.
+- [ ] Implement DSI command transmission.
+
+** TODO Implement PHY Logic [0/1]
+- [ ] Implement `sun6i_mipi_dphy` configuration (or inline in DSI driver).
+
+** TODO Port Panel Driver
+- [ ] Create `drivers/video/panel-ilitek-ili9881c.c`.
+- [ ] Ensure it uses U-Boot DSI helpers.
+
+* TODO Phase 3: Verification
+** TODO Verify Splash Screen
+- [ ] Flash and boot on board.
+- [ ] Check for logo.

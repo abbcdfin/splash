@@ -1,0 +1,43 @@
+# Implementation Plan - Project Splash
+
+This plan outlines the steps to enable MIPI DSI splash screen support for the Allwinner T113-S platform in U-Boot.
+
+## Phase 1: Infrastructure and Core Drivers
+
+### 1. Analyze and Map T113-S Display Pipeline in U-Boot
+- Task: Investigate `drivers/video/sunxi/sunxi_de2.c` and `sunxi_lcd.c`.
+- Goal: Determine how to insert `tcon_top`, `dsi`, and `dphy` into the probe sequence.
+- Status: DONE. Decided to merge T113/D1 logic into `sunxi_de2.c` using `CONFIG_SUNXI_GEN_NCAT2` guards.
+
+### 2. Implement `sun8i_tcon_top` Driver
+- Task: Port minimal TCON_TOP driver.
+- Goal: Enable routing from Mixer 0 to TCON LCD 0.
+- Status: STARTED. Skeleton created in `sun8i_tcon_top.c`.
+
+### 3. Implement `sun6i_mipi_dsi` Controller Driver
+- Task: Port MIPI DSI controller driver.
+- Goal: Support DSI host initialization and basic DSI packet transfers.
+- Status: STARTED. Skeleton created in `sun6i_mipi_dsi.c`.
+
+## Phase 2: Driver Logic Implementation
+
+### 4. Implement Clock and Reset Initialization
+- Task: Implement T113 specific clock setup in `sunxi_de2_composer_init` within `sunxi_de2.c`.
+- Goal: Enable DE, TCON, DSI clocks in CCU.
+- Status: TODO
+
+### 5. Implement DSI and PHY Logic
+- Task: Implement register programming for DSI and D-PHY.
+- Goal: Bring up the DSI link.
+- Status: TODO
+
+### 6. Port ILI9881C Panel Driver
+- Task: Port `drivers/gpu/drm/panel/panel-ilitek-ili9881c.c` from Linux.
+- Goal: Implement the `hd50004c30` initialization sequence.
+- Status: TODO
+
+## Phase 3: Integration and Verification
+
+### 7. Splash Screen Enablement and Testing
+- Task: Configure U-Boot to use the new display path for the splash screen.
+- Status: TODO
