@@ -1,0 +1,4 @@
+[submodule "u-boot"]
+	path = u-boot
+	url = git@github.com:sys-in-technologies/u-boot.git
+	branch = vc-mipi-dsi
