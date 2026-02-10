@@ -27,8 +27,4 @@ The work space of this project is /home/jian/Download/splash
 This is a embedded software project. Please source /home/jian/.scripts/setup-oe.sh, it will setup the bash environment for cross compiling.
 
 * Immediate Action
-Pleae check tasks for the immediate actions.
-
-1. Read ./README.org to understand the goal.
-2. Read ./display_framework_summary.md for technical context.
-3. Propose the first 3 entries for implementation-plan.org based on the above.
+Pleae check tasks.org for the immediate actions.

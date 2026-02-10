@@ -1,11 +1,126 @@
 #+TITLE: Project Splash Tasks
 #+TODO: TODO(t) NEXT(n) IN-PROGRESS(i) WAITING(w) | DONE(d) CANCELED(c)
 
-* NEXT Context & Planning Initialization
+* DONE Context & Planning Initialization
   The environment is set up. We need to ingest the requirements and create the initial plan.
-  
+
   **Action Items:**
-  1. Read [[file:README.org][README]] to understand the high-level specification.
-  2. [ ] Read [[file:display_framework_summary.md][Display Framework Summary]] to understand the MIPI DSI context[cite: 5].
-  3. [ ] Based on the above, draft the initial headers for [[file:implementation-plan.org][implementation-plan.org]].
-  4. [ ] List the all the technical tasks required to backport the driver.
+  1. [X] Read [[file:README.org][README]] to understand the high-level specification.
+  2. [X] Read [[file:display_framework_summary.md][Display Framework Summary]] to understand the MIPI DSI context.
+  3. [X] Based on the above, draft the initial headers for [[file:implementation-plan.org][implementation-plan.org]].
+  4. [X] List the all the technical tasks required to backport the driver.
+
+  **Log:** Plan created in implementation-plan.org with 4 phases, 10 work items. Linux sources and U-Boot state fully analyzed.
+
+* Phase 1: Clock and PHY Foundation
+** DONE Verify T113-S CCU clock support for MIPI DSI
+   :PROPERTIES:
+   :PLAN_REF: 1.1
+   :END:
+   - Check U-Boot CCU driver for CLK_BUS_MIPI_DSI, CLK_MIPI_DSI
+   - Files to inspect: =u-boot/drivers/clk/sunxi/clk_*= for T113/R528/D1 support
+   - Add missing clock gates/dividers if absent
+   - Linux ref: =linux/arch/riscv/boot/dts/allwinner/sunxi-d1s-t113.dtsi= (DSI clock assignments)
+
+   **Log:** Added 7 clock gates (CLK_DE, CLK_BUS_DE, CLK_BUS_DPSS_TOP, CLK_MIPI_DSI, CLK_BUS_MIPI_DSI, CLK_TCON_LCD0, CLK_BUS_TCON_LCD0) and 4 resets (RST_BUS_DE, RST_BUS_DPSS_TOP, RST_BUS_MIPI_DSI, RST_BUS_TCON_LCD0, RST_BUS_LVDS0) to =clk_d1.c=. Register offsets from Linux =ccu-sun20i-d1.c=.
+
+** DONE Backport sun6i MIPI D-PHY driver
+   :PROPERTIES:
+   :PLAN_REF: 1.2
+   :END:
+   - Source: =linux/drivers/phy/allwinner/phy-sun6i-mipi-dphy.c= (648 lines)
+   - Target: =u-boot/drivers/phy/allwinner/phy-sun6i-mipi-dphy.c=
+   - Port to U-Boot PHY framework (=struct phy_ops=)
+   - Preserve TX timing (HS_TRAIL, HS_PREPARE, CLK_PRE/POST/ZERO) and analog config
+   - Add Kconfig entry and Makefile integration
+
+   **Log:** Created =u-boot/drivers/phy/allwinner/phy-sun6i-mipi-dphy.c= (~290 lines). Supports A31 and A100 variants. Replaced Linux regmap with direct readl/writel. Added Kconfig (PHY_SUN6I_MIPI_DPHY, selects MIPI_DPHY_HELPERS) and Makefile entries.
+
+* Phase 2: Display Pipeline Drivers
+** TODO Backport sun6i MIPI DSI controller driver
+   :PROPERTIES:
+   :PLAN_REF: 2.1
+   :DEPENDS: 1.1, 1.2
+   :END:
+   - Source: =linux/drivers/gpu/drm/sun4i/sun6i_mipi_dsi.c= (1,262 lines)
+   - Target: =u-boot/drivers/video/sunxi/sun6i_mipi_dsi.c=
+   - Implement as U-Boot DSI host uclass driver
+   - Strip DRM connector/encoder, use U-Boot display model
+   - Variant: sun50i-a100-mipi-dsi (has_mod_clk, set_mod_clk)
+
+** TODO Add DSI output mode to TCON/LCDC
+   :PROPERTIES:
+   :PLAN_REF: 2.2
+   :END:
+   - Extend =u-boot/drivers/video/sunxi/lcdc.c= for DSI timing
+   - Set SUN4I_TCON0_CPU_IF_MODE_DSI in TCON0 control register
+   - Configure TCON Top mux: mixer0 → TCON LCD0 → DSI
+   - Linux ref: =linux/drivers/gpu/drm/sun4i/sun4i_tcon.c= DSI paths
+
+** TODO Extend DE2 driver for DSI output path
+   :PROPERTIES:
+   :PLAN_REF: 2.3
+   :END:
+   - Update =u-boot/drivers/video/sunxi/sunxi_de2.c=
+   - Ensure mixer0 framebuffer + blender work for DSI output
+   - Connect DE2 probe to TCON → DSI pipeline
+
+* Phase 3: Panel and Device Tree
+** TODO Backport ILI9881C panel driver
+   :PROPERTIES:
+   :PLAN_REF: 3.1
+   :END:
+   - Source: =linux/drivers/gpu/drm/panel/panel-ilitek-ili9881c.c= (2,072 lines)
+   - Target: =u-boot/drivers/video/panel-ilitek-ili9881c.c=
+   - Include hd50004c30 variant init sequence
+   - Implement U-Boot =panel_ops= (enable, get_display_timing)
+   - Handle: regulator, GPIO reset, MIPI DCS init commands
+
+** TODO Add display nodes to U-Boot device tree
+   :PROPERTIES:
+   :PLAN_REF: 3.2
+   :DEPENDS: 2.1, 2.2, 2.3, 3.1
+   :END:
+   - Target: =u-boot/arch/arm/dts/sun8i-t113s-raft-gw-argon-vb.dts=
+   - Add: DE2, mixer0, TCON Top, TCON LCD0, DSI, D-PHY, panel nodes
+   - Add endpoint graph connections
+   - Linux ref: =linux/arch/arm/boot/dts/allwinner/sun8i-t113s-raft-gw-argon-va.dts=
+
+** TODO Enable video in board defconfig
+   :PROPERTIES:
+   :PLAN_REF: 3.3
+   :DEPENDS: 3.2
+   :END:
+   - Target: =u-boot/configs/raft-gw-argon-vb_defconfig=
+   - Enable: CONFIG_VIDEO, CONFIG_DM_VIDEO, CONFIG_VIDEO_DE2
+   - Enable: CONFIG_DISPLAY, CONFIG_VIDEO_MIPI_DSI
+   - Enable: CONFIG_PHY_SUN6I_MIPI_DPHY, CONFIG_VIDEO_LCD_ILI9881C (new)
+   - Enable: CONFIG_SPLASH_SCREEN
+
+* Phase 4: Integration and Testing
+** TODO Build integration and cross-compile
+   :PROPERTIES:
+   :PLAN_REF: 4.1
+   :DEPENDS: 3.3
+   :END:
+   - Add new drivers to Kconfig and Makefiles
+   - Resolve compile errors
+   - Cross-compile: =source /home/jian/.scripts/setup-oe.sh=
+
+** TODO Boot testing and validation
+   :PROPERTIES:
+   :PLAN_REF: 4.2
+   :DEPENDS: 4.1
+   :END:
+   - Flash to board and verify success criteria:
+     - [ ] DSI controller probes successfully
+     - [ ] Panel initializes and displays splash image
+     - [ ] Display stable until Linux kernel handoff
+
+** TODO Configure splash screen
+   :PROPERTIES:
+   :PLAN_REF: 4.3
+   :DEPENDS: 4.2
+   :END:
+   - Configure BMP splash image loading from storage
+   - Set boot environment variables for splash
