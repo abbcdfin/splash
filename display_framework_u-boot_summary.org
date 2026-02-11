@@ -1,0 +1,43 @@
+* U-Boot Video Driver Framework Analysis: Rockchip vs. Allwinner
+
+** 1. Framework Overview
+U-Boot uses a Driver Model (DM) based approach for video.
+
+- *UCLASS_VIDEO*: Main display controller driver (Frame buffer, Display Engine).
+- *UCLASS_DISPLAY / UCLASS_VIDEO_BRIDGE*: Output interfaces (HDMI, DSI, LVDS).
+- *UCLASS_DSI_HOST*: Specialized class for MIPI DSI controllers (Generic DesignWare driver: ~drivers/video/dw_mipi_dsi.c~).
+- *UCLASS_PANEL*: Represents the connected LCD panel.
+
+** 2. Rockchip Implementation (The Reference)
+Rockchip provides a complete, working reference.
+
+*** Display Controller (~rk_vop.c~)
+- Implements ~UCLASS_VIDEO~.
+- Probes hardware, parses Device Tree for ports/endpoints.
+- Configures VOP for HDMI, EDP, or MIPI based on detected endpoint.
+
+*** DSI Platform Driver (~dw_mipi_dsi_rockchip.c~)
+- Glue layer between generic DesignWare core and specific SoC hardware.
+- *Responsibilities:*
+  - PHY Configuration (D-PHY initialization, calibration).
+  - Clock & Reset management.
+  - Binding to generic ~dw_mipi_dsi~ driver.
+
+*** Generic DSI Core (~dw_mipi_dsi.c~)
+- Handles DSI protocol (packets, modes).
+- Calls platform driver via ~dsi_rockchip_phy_ops~ for physical link setup.
+
+** 3. Allwinner (Sunxi) Comparison & Gaps
+Current implementation supports HDMI and Parallel LCD but lacks MIPI DSI.
+
+*** Display Controller (~sunxi_de2.c~)
+- Initializes Display Engine 2.0.
+- Only scans for ~sunxi_lcd~ (Parallel) and ~sunxi_dw_hdmi~ (HDMI).
+- *Gap:* Does not check for or support MIPI DSI drivers.
+
+*** HDMI Driver (~sunxi_dw_hdmi.c~)
+- Example of DesignWare IP wrapper for Allwinner.
+- Confirms Allwinner usage of DesignWare for display interfaces.
+
+*** Missing DSI Driver
+- No ~dw_mipi_dsi_sunxi.c~ exists.

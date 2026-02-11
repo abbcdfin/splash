@@ -1,4 +1,4 @@
-# Allwinner T113 Display Framework Summary
+# Allwinner T113 Linux Display Framework Summary
 
 ## Overview
 The Allwinner T113 SoC uses the Display Engine 2.0 (DE2) architecture for its display pipeline, which follows the Linux DRM (Direct Rendering Manager) framework with a component-based design.

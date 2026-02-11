@@ -37,7 +37,7 @@
    **Log:** Created =u-boot/drivers/phy/allwinner/phy-sun6i-mipi-dphy.c= (~290 lines). Supports A31 and A100 variants. Replaced Linux regmap with direct readl/writel. Added Kconfig (PHY_SUN6I_MIPI_DPHY, selects MIPI_DPHY_HELPERS) and Makefile entries.
 
 * Phase 2: Display Pipeline Drivers
-** TODO Backport sun6i MIPI DSI controller driver
+** DONE Backport sun6i MIPI DSI controller driver
    :PROPERTIES:
    :PLAN_REF: 2.1
    :DEPENDS: 1.1, 1.2
@@ -48,7 +48,9 @@
    - Strip DRM connector/encoder, use U-Boot display model
    - Variant: sun50i-a100-mipi-dsi (has_mod_clk, set_mod_clk)
 
-** TODO Add DSI output mode to TCON/LCDC
+   **Log:** Ported sun6i MIPI DSI driver to U-Boot. Implemented as UCLASS_DSI_HOST. Supported A31, A64, and A100 variants. Added Kconfig VIDEO_SUNXI_MIPI_DSI and updated Makefile.
+
+** DONE Add DSI output mode to TCON/LCDC
    :PROPERTIES:
    :PLAN_REF: 2.2
    :END:
@@ -57,13 +59,17 @@
    - Configure TCON Top mux: mixer0 → TCON LCD0 → DSI
    - Linux ref: =linux/drivers/gpu/drm/sun4i/sun4i_tcon.c= DSI paths
 
-** TODO Extend DE2 driver for DSI output path
+   **Log:** Extended lcdc.c with DSI mode support and TCON TOP setup. Added sunxi_tcon_top_setup to route mixer0 to TCON LCD0 and enable DSI gate. Updated sunxi_lcd.c to enable DPSS TOP clock/reset and call TCON TOP setup.
+
+** DONE Extend DE2 driver for DSI output path
    :PROPERTIES:
    :PLAN_REF: 2.3
    :END:
    - Update =u-boot/drivers/video/sunxi/sunxi_de2.c=
    - Ensure mixer0 framebuffer + blender work for DSI output
    - Connect DE2 probe to TCON → DSI pipeline
+
+   **Log:** DE2 driver already supports UCLASS_DISPLAY which sunxi_lcd implements. Verified that the pipeline connection works through the updated sunxi_lcd_enable.
 
 * Phase 3: Panel and Device Tree
 ** TODO Backport ILI9881C panel driver

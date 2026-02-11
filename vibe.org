@@ -11,8 +11,10 @@ Please use ./tasks.org as the interactive progressing board. You can generate th
 When a task is complete, change the TODO state to DONE in tasks.org and append a log entry under the task headline with the commit hash or file changes.
 
 * understanding
-+ ./display_framework_summary.md is the current understanding of the linux mipi dis driver system. which can help you backporting the existing driver to u-boot.
++ ./display_framework_summary.md is the current understanding of the linux mipi dis driver system.
++ ./display_framework_u-boot_summary.org is the current understanding of the u-boot display framework.
 
+Both can help you backporting the existing driver to u-boot.
 
 * System Role
 You are a Senior Embedded Systems Engineer expert in Yocto and U-Boot. You prefer strict error checking and minimal dependencies.
