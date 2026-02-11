@@ -84,7 +84,7 @@
 
    **Log:** Backported ILI9881C panel driver to U-Boot. Implemented hd50004c30 variant with 720x1280 timing and DCS init sequence. Added Kconfig and Makefile integration.
 
-** TODO Add display nodes to U-Boot device tree
+** DONE Add display nodes to U-Boot device tree
    :PROPERTIES:
    :PLAN_REF: 3.2
    :DEPENDS: 2.1, 2.2, 2.3, 3.1
@@ -93,6 +93,8 @@
    - Add: DE2, mixer0, TCON Top, TCON LCD0, DSI, D-PHY, panel nodes
    - Add endpoint graph connections
    - Linux ref: =linux/arch/arm/boot/dts/allwinner/sun8i-t113s-raft-gw-argon-va.dts=
+
+   **Log:** Directly integrated the Linux board DTS for raft-gw-argon-vb into U-Boot's dts/upstream. Added missing uart0_pe_pins definition to ensure compilation. Enabled all display pipeline nodes (DE, mixer, TCON TOP, TCON LCD0, DSI, D-PHY, panel) in the device tree.
 
 ** TODO Enable video in board defconfig
    :PROPERTIES:
