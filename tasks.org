@@ -96,7 +96,7 @@
 
    **Log:** Directly integrated the Linux board DTS for raft-gw-argon-vb into U-Boot's dts/upstream. Added missing uart0_pe_pins definition to ensure compilation. Enabled all display pipeline nodes (DE, mixer, TCON TOP, TCON LCD0, DSI, D-PHY, panel) in the device tree.
 
-** TODO Enable video in board defconfig
+** DONE Enable video in board defconfig
    :PROPERTIES:
    :PLAN_REF: 3.3
    :DEPENDS: 3.2
@@ -106,6 +106,8 @@
    - Enable: CONFIG_DISPLAY, CONFIG_VIDEO_MIPI_DSI
    - Enable: CONFIG_PHY_SUN6I_MIPI_DPHY, CONFIG_VIDEO_LCD_ILI9881C (new)
    - Enable: CONFIG_SPLASH_SCREEN
+
+   **Log:** Updated raft-gw-argon-vb_defconfig to enable all necessary video components, MIPI DSI, ILI9881C panel, and splash screen support (including BMP 16/24/32bpp). Verified full build with these options.
 
 * Phase 4: Integration and Testing
 ** TODO Build integration and cross-compile
