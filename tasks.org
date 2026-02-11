@@ -72,7 +72,7 @@
    **Log:** DE2 driver already supports UCLASS_DISPLAY which sunxi_lcd implements. Verified that the pipeline connection works through the updated sunxi_lcd_enable.
 
 * Phase 3: Panel and Device Tree
-** TODO Backport ILI9881C panel driver
+** DONE Backport ILI9881C panel driver
    :PROPERTIES:
    :PLAN_REF: 3.1
    :END:
@@ -81,6 +81,8 @@
    - Include hd50004c30 variant init sequence
    - Implement U-Boot =panel_ops= (enable, get_display_timing)
    - Handle: regulator, GPIO reset, MIPI DCS init commands
+
+   **Log:** Backported ILI9881C panel driver to U-Boot. Implemented hd50004c30 variant with 720x1280 timing and DCS init sequence. Added Kconfig and Makefile integration.
 
 ** TODO Add display nodes to U-Boot device tree
    :PROPERTIES:
