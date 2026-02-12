@@ -1,0 +1,190 @@
+#+TITLE: Video Clock Initialization Fix Plan
+#+DATE: [2026-02-12 Wed]
+
+* Context
+
+The splash screen does not display because the video-related clocks in U-Boot are initialized with incorrect rates and sources. A detailed comparison of the Linux kernel v6.10 and U-Boot clock initialization reveals *4 critical problems*, all in the NCAT2 (T113/D1) direct-register-write paths.
+
+* Problem Analysis
+
+** Clock Chain in Linux (correct reference)
+
+For DSI with the ILI9881C panel (720x1280, 24bpp, 4 lanes, pixel_clock=66.528 MHz):
+
+#+begin_example
+PLL_VIDEO0_4X (reg 0x040)  ~1596 MHz  (N=66-67)
+  ├─→ pll_video0_1x (/4)   ~399 MHz
+  │     └─→ CLK_TCON_LCD0 (reg 0xb60, MP divider, mux=0)  ~399 MHz
+  │           └─→ TCON_TOP DSI gate (bit 16 of tcon_top+0x20)
+  │                 └─→ DSI controller "mod" clock  ~399 MHz
+  │           └─→ TCON dclk (TCON0_DCLK reg, div=4)  ~99.8 MHz
+  │
+  └─→ pll_video0_2x (/2)   ~798 MHz
+        └─→ CLK_MIPI_DSI (reg 0xb24, M divider, mux=2)  150 MHz
+              └─→ D-PHY "mod" clock
+#+end_example
+
+Key rates (from Linux, known-good):
+- *PLL_VIDEO0_4X*: ~1596 MHz (set via CLK_SET_RATE_PARENT propagation)
+- *CLK_TCON_LCD0*: ~399 MHz = pixel_clock * bpp / lanes = 66.528 * 6
+- *TCON dclk*: ~99.8 MHz = TCON_LCD0 / 4 (SUN6I_DSI_TCON_DIV = 4)
+- *CLK_MIPI_DSI*: 150 MHz (D-PHY mod clock, from pll_video0_2x with M divider)
+
+** Problem 1: PLL_VIDEO0 rate is ~8x too low
+
+*File:* =u-boot/drivers/video/sunxi/lcdc.c= — =lcdc_pll_set()=
+*File:* =u-boot/drivers/video/sunxi/sunxi_lcd.c= — =sunxi_lcd_enable()=
+
+=lcdc_pll_set()= calculates PLL_VIDEO0 for the raw pixel clock (66.528 MHz). It finds =best_n=33=, setting =PLL_VIDEO0_4X = 33 * 6 = 198 MHz=.
+
+Then =sunxi_lcd_enable()= overrides =clk_div = 4= for DSI, but the PLL rate was calculated assuming =clk_div = best_m = 6=.
+
+*Current (wrong):*
+| Clock           | Rate      |
+|-----------------+-----------|
+| PLL_VIDEO0_4X   | 198 MHz   |
+| PLL_VIDEO0_1X   | 49.5 MHz  |
+| TCON_LCD0_CLK   | 49.5 MHz  |
+| TCON dclk       | 12.4 MHz  |
+
+*Required (correct):*
+| Clock           | Rate      |
+|-----------------+-----------|
+| PLL_VIDEO0_4X   | ~1596 MHz |
+| PLL_VIDEO0_1X   | ~399 MHz  |
+| TCON_LCD0_CLK   | ~399 MHz  |
+| TCON dclk       | ~99.8 MHz |
+
+The root cause: For DSI, the TCON needs =pixel_clock * bpp / lanes= as the parent clock, not just the pixel clock. The =lcdc_pll_set()= function was designed for LVDS/parallel LCD and cannot handle DSI's clock requirements.
+
+** Problem 2: CLK_MIPI_DSI (0xb24) has wrong source and rate
+
+*File:* =u-boot/drivers/video/sunxi/sun6i_mipi_dsi.c:928=
+*File:* =u-boot/drivers/phy/allwinner/phy-sun6i-mipi-dphy.c:432=
+
+Both files write to register 0xb24 with mux=0 (hosc=24 MHz). The D-PHY probe writes =BIT(31) | 1= (gate on, M=1 which means div-by-2).
+
+*Result:* CLK_MIPI_DSI = *24 MHz or 12 MHz* (should be *150 MHz*)
+
+In Linux, CLK_MIPI_DSI parents are (from =ccu-sun20i-d1.c:718-724=):
+| Mux | Source           | Notes               |
+|-----+------------------+----------------------|
+|   0 | hosc (24 MHz)    | U-Boot uses (WRONG)  |
+|   1 | pll_periph0      |                      |
+|   2 | pll_video0_2x    | Linux uses (CORRECT) |
+|   3 | pll_video1_2x    |                      |
+|   4 | pll_audio1_div2  |                      |
+
+Linux D-PHY init sets this to 150 MHz (=phy-sun6i-mipi-dphy.c:206=).
+
+** Problem 3: DSI controller mod clock source confusion
+
+*File:* =u-boot/drivers/video/sunxi/sun6i_mipi_dsi.c:924-936=
+
+The DSI probe writes to 0xb24 (CLK_MIPI_DSI) thinking it is the DSI "mod" clock. But per the Linux DT (=sunxi-d1s-t113.dtsi:707-709=):
+- *DSI mod clock* = =<&tcon_top CLK_TCON_TOP_DSI>= = gate on CLK_TCON_LCD0 (via TCON_TOP)
+- *0xb24* = CLK_MIPI_DSI = D-PHY mod clock (NOT the DSI controller mod clock)
+
+The TCON_TOP DSI gate is already enabled in =sunxi_tcon_top_setup()=, so the DSI controller does receive the correct clock through hardware. But the DSI probe incorrectly writes to the D-PHY clock register instead.
+
+** Problem 4: TCON_LCD0 clock (0xb60) has no M/P dividers configured
+
+*File:* =u-boot/drivers/video/sunxi/lcdc.c:364=
+
+#+begin_src c
+writel(BIT(31) | (0 << 24), (u8 *)SUNXI_CCM_BASE + 0xb60);
+#+end_src
+
+Only gate and mux are set. M (bits 3:0) and P (bits 9:8) are left at 0, meaning divide-by-1. This is correct IF the PLL rate is set properly (Problem 1 fix). Once PLL is fixed, M=1 P=1 (no division) works because =PLL_VIDEO0_1X = PLL_VIDEO0_4X / 4 = TCON_LCD0_CLK= directly.
+
+* Fix Plan
+
+** TODO Fix 1: Correct PLL_VIDEO0 and TCON_LCD0 clock for DSI
+:PROPERTIES:
+:PRIORITY: A
+:END:
+
+*File:* =u-boot/drivers/video/sunxi/sunxi_lcd.c=
+
+For DSI mode on NCAT2, bypass =lcdc_pll_set()= and calculate PLL directly:
+
+#+begin_example
+Required TCON_LCD0_CLK = pixel_clock * bpp / lanes
+                       = 66,528,000 * 24 / 4 = 399,168,000 Hz
+
+Required PLL_VIDEO0_4X = TCON_LCD0_CLK * 4  (mux=0 selects pll_video0_1x)
+                       = 1,596,672,000 Hz
+
+N = PLL_VIDEO0_4X / 24,000,000 = 66.528 → round to 67
+Actual PLL_VIDEO0_4X = 67 * 24 = 1,608,000,000 Hz
+Actual TCON_LCD0_CLK = 1,608 / 4 = 402 MHz
+TCON dclk = 402 / 4 = 100.5 MHz (close enough to 99.8)
+#+end_example
+
+*Changes in =sunxi_lcd_enable()= (NCAT2 + DSI path):*
+1. Get panel bpp and lanes from =mipi_dsi_device=
+2. Calculate =dsi_bit_clk = pixel_clock * bpp / lanes=
+3. Call =clock_set_pll3(dsi_bit_clk * 4)= to set PLL_VIDEO0_4X correctly
+4. Keep TCON_LCD0 clock at 0xb60: mux=0 (pll_video0_1x), M=0, P=0
+5. Set =clk_div = 4= for TCON0_DCLK register
+6. Skip =lcdc_pll_set()= entirely for this path
+
+** TODO Fix 2: Correct CLK_MIPI_DSI (0xb24) for D-PHY
+:PROPERTIES:
+:PRIORITY: A
+:END:
+
+*File:* =u-boot/drivers/phy/allwinner/phy-sun6i-mipi-dphy.c=
+
+Change the DPHY probe's register write to select pll_video0_2x (mux=2) with a dynamic M divider targeting 150 MHz:
+
+#+begin_src c
+/* Select pll_video0_2x (mux=2), compute M for ~150 MHz */
+u32 pll_video0_2x = clock_get_pll3() / 2;
+u32 m_div = DIV_ROUND_UP(pll_video0_2x, 150000000);
+writel(BIT(31) | (2 << 24) | (m_div - 1), (u8 *)SUNXI_CCM_BASE + 0xb24);
+#+end_src
+
+Note: =clock_get_pll3()= returns PLL_VIDEO0_4X. So =pll_video0_2x = PLL_VIDEO0_4X / 2=.
+
+*Important ordering:* This code must run AFTER PLL_VIDEO0 is configured (Fix 1). Currently the D-PHY probe runs before =sunxi_lcd_enable()=. The DPHY probe's write is an early default; the actual rate can be adjusted during =sun6i_dphy_init()= (called later from the DSI init path). Move the 150 MHz setup into =sun6i_dphy_init()= instead.
+
+** TODO Fix 3: Remove incorrect 0xb24 write from DSI controller probe
+:PROPERTIES:
+:PRIORITY: B
+:END:
+
+*File:* =u-boot/drivers/video/sunxi/sun6i_mipi_dsi.c=
+
+Remove the =#ifdef CONFIG_SUNXI_GEN_NCAT2= block at line 924-936 that writes to 0xb24 inside the DSI probe. The DSI controller's mod clock comes from TCON_TOP (already gated on by =sunxi_tcon_top_setup()=), not from CCU register 0xb24.
+
+The TCON_TOP DSI gate passes through CLK_TCON_LCD0 which will be correctly configured by Fix 1.
+
+* Files to Modify
+
+| File                                                    | Change                                    |
+|---------------------------------------------------------+-------------------------------------------|
+| =u-boot/drivers/video/sunxi/sunxi_lcd.c=               | Fix PLL and TCON clock calculation for DSI |
+| =u-boot/drivers/phy/allwinner/phy-sun6i-mipi-dphy.c=   | Fix CLK_MIPI_DSI source and rate           |
+| =u-boot/drivers/video/sunxi/sun6i_mipi_dsi.c=          | Remove incorrect 0xb24 write               |
+
+* Reference Files (read-only)
+
+- =linux/drivers/clk/sunxi-ng/ccu-sun20i-d1.c= — Clock definitions (parents, mux indices)
+- =linux/drivers/gpu/drm/sun4i/sun4i_tcon.c:346-364= — DSI TCON clock formula
+- =linux/drivers/gpu/drm/sun4i/sun6i_mipi_dsi.c:741-754= — DSI mod clock setup
+- =linux/drivers/phy/allwinner/phy-sun6i-mipi-dphy.c:200-209= — DPHY clock init
+- =linux/arch/riscv/boot/dts/allwinner/sunxi-d1s-t113.dtsi:702-732= — DT clock assignments
+
+* Verification
+
+1. Cross-compile: =source /home/jian/.scripts/setup-oe.sh && make -j$(nproc)=
+2. Add debug prints to verify register readback:
+   - PLL_VIDEO0_4X (0x040) after setup → expect ~1596-1608 MHz
+   - TCON_LCD0_CLK (0xb60) after setup → expect gate on, mux=0
+   - CLK_MIPI_DSI (0xb24) after setup → expect mux=2, ~150 MHz
+3. Flash to board and check:
+   - [ ] DSI controller probes without errors
+   - [ ] D-PHY initializes with correct HS clock rate
+   - [ ] Panel receives DCS init commands (no timeout)
+   - [ ] Framebuffer content appears on screen
