@@ -63,6 +63,61 @@ Master DRM Device (sun4i_drv.c)
 - **Main CCU**: Contains clocks `CLK_BUS_DSI`, `CLK_MIPI_DSI`
 - **Display CCU**: Separate clock controller for display components
 
+#### PLL VIDEO0 setup
+The Linux function responsible for setting up PLL_VIDEO0 (and other NM-style PLLs) is `ccu_nm_set_rate` in linux/drivers/clk/sunxi-ng/ccu_nm.c.
+
+Key Logic in ccu_nm_set_rate:
+
+1. Find Best Factors: It calls `ccu_nm_find_best`, which iterates through all possible $N$ and $M$ values to find the combination that gets closest to the requested target rate.
+* $N$ is the multiplier.
+* $M$ is the input divider (usually $M=1$ for Video PLLs).
+* Formula: $Rate = Parent \times N / M$ (typically $24MHz \times N / 1$).
+
+
+2. Register Write:
+* It reads the current register value (e.g., from 0x040).
+* It clears the old $N$ and $M$ bits.
+* It shifts and ORs the new _nm.n and _nm.m values into the register.
+* It performs a single writel to apply the changes.
+  
+3. Wait for Lock: After writing, it calls ccu_helper_wait_for_lock, which polls the lock bit (Bit 28 for pll-video0-4x) to ensure the frequency has stabilized before returning.
+
+Relation to MIPI DSI:
+When the DSI host requests a specific bit clock (e.g., 400MHz), the clock framework propagates this request up to pll-video0-4x. The ccu_nm_set_rate function then recalculates
+$N$ (e.g., $N=67$ for $1608MHz$) to satisfy the entire downstream chain.
+
+#### CLK_MIPI_DSI setup
+In the Linux implementation, when setting the mipi_dsi_clk, the function `ccu_div_set_rate` is called.
+
+Function Breakdown:
+* `.set_rate` in ccu_div_ops is mapped to `ccu_div_set_rate`.
+* `ccu_mux_helper_set_parent` is used to change the parent clock (mux).
+  
+
+Step-by-Step Logic:
+1. Calculate Divider: ccu_div_set_rate calls divider_get_val to find the integer value (val) for the post-divider (the M factor).
+2. Read-Modify-Write:
+* It reads the current register value from 0xb24.
+* It clears the old divider bits (Bits 3:0).
+* It writes the new value back using writel(reg | (val << cd->div.shift), ...).
+3. Parent Selection: If a parent change is required (e.g., switching to pll-video0-2x), the CCF also calls `ccu_div_set_parent`, which uses `ccu_mux_helper_set_parent` to write
+the mux index to bits 26:24.
+
+
+Since mipi_dsi_clk is defined with the CLK_SET_RATE_PARENT flag, calling clk_set_rate on it will also trigger a rate change in its parent (pll-video0-2x), which in turn triggers
+a change in pll-video0-4x (managed by ccu_nm_set_rate in ccu_nm.c). This propagation is what ensures the entire video clock chain is correctly configured for the panel's needs.
+
+### Implementation
+For the T113-S (which is architecturally equivalent to the R528 and D1 for clocking), the relevant files in the Linux kernel are:
+	
+1. Main Clock Driver Implementation:
+linux/drivers/clk/sunxi-ng/ccu-sun20i-d1.c
+This file contains all the register offsets and clock definitions (e.g., #define SUN20I_D1_PLL_CPUX_REG 0x000).
+2. Clock Driver Header:
+linux/drivers/clk/sunxi-ng/ccu-sun20i-d1.h
+3. Device Tree Bindings (defining the clock IDs):
+linux/include/dt-bindings/clock/sun20i-d1-ccu.h
+
 ### Display Chain Clocks
 - **DSI Controller**: Gets clocks from main CCU (`CLK_BUS_MIPI_DSI`, `CLK_MIPI_DSI`)
 - **TCON**: Gets TCON-specific clocks

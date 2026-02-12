@@ -1,0 +1,46 @@
+#+TITLE: Manual debug the problems.
+
+* no splash screen displayed.
+
+** arch macro
+SUN8I_R528
+
+** check linux kernel to make sure all the modules are with proper configuration.
+
+*** DPHY
+
+
++ u-boot:
+DPHY: Initializing...
+DPHY: CLK_MIPI_DSI: PLL_4X=1584000000, PLL_2X=792000000, M=6, actual=132000000 Hz
+DPHY: Configuring (priv=4cf80508, 4 lanes, bitrate 399168000)...
+DPHY: lanes stored in priv: 4
+DPHY: Powering on (priv=4cf80508, 4 lanes)...
+DPHY: Timings: hs_prep=25, hs_trail=35, clk_prep=19, clk_zero=131
+
+There is no clock set rates, so has to do it all by it self?
+
+
++ linux:
+
+linux driver "allwinner,sun50i-a100-mipi-dphy".
+
+clock source can set rate.
+
+CLK_MIPI_DSI 110, ccu
+
+[    2.953715] ccu_nm_set_rate: write f9006202 to d08cd040
+[    2.959069] ccu_div_set_rate: write 0 to d08cdf34
+[    2.963807] ccu_div_set_rate: write 82000005 to d08cdb24
+[    2.969190] ccu_div_set_rate: write 81000003 to d08cd600
+[    2.974519] ccu_div_set_rate: write 0 to d08e000c
+[    2.979265] ccu_div_set_rate: write 0 to d08e000c
+[    2.983980] ccu_div_set_rate: write 0 to d08e000c
+[   37.745930] ccu_nm_set_rate: write f9008402 to d08cd040
+[   37.745967] ccu_div_set_rate: write 81000003 to d08cd600
+[   37.745977] ccu_div_set_rate: write 0 to d08e000c
+[   37.745987] ccu_div_set_rate: write 0 to d08e000c
+[   37.745996] ccu_div_set_rate: write 0 to d08e000c
+[   37.746005] ccu_div_set_rate: write 0 to d08cdf34
+[   37.746030] ccu_div_set_rate: write 2000005 to d08cdb24
+[   37.746378] ccu_div_set_rate: write 81000003 to d08cdb24

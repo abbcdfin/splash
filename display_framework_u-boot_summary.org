@@ -30,6 +30,34 @@ Rockchip provides a complete, working reference.
 ** 3. Allwinner (Sunxi) Comparison & Gaps
 Current implementation supports HDMI and Parallel LCD but lacks MIPI DSI.
 
+*** clock
+clock_set_pll3 is required because it configures PLL_VIDEO0, the root clock source for the entire display pipeline. In a MIPI DSI setup, the clocking requirements are high: the
+  D-PHY needs a high-speed serial clock (bit clock), and the TCON needs a pixel clock derived from that same PLL.
+
+
+For the T113-S (SUNXI_GEN_NCAT2), the control register for PLL_VIDEO0 is located at `0x02001040`.
+
+
+Why it is needed:
+   1. DSI Bit Clock Generation: MIPI DSI requires a very high frequency to transmit data over serial lanes (e.g., ~400MHz per lane for a 720p panel).
+   2. Clock Synchronization: Both the DSI controller and the TCON must be synchronized to the same frequency source to ensure pixels are pushed out at the correct rate.
+   3. Frequency Precision: Standard peripheral PLLs (like PLL_PERIPH0 at 600MHz) often cannot be divided down to the exact pixel clock needed by the panel. `clock_set_pll3` allows
+      the SoC to tune the video PLL multiplier to match the specific requirements of the attached LCD.
+
+Register Details:
+  In the U-Boot headers for the T113-S (arch/arm/include/asm/arch-sunxi/clock_sun50i_h6.h), the register is accessed at offset 0x40 from the CCU base. The bit fields are typically:
+   * Bit 31: CCM_PLL_CTRL_EN (Enable)
+   * Bit 30: CCM_PLL_LDO_EN (LDO Enable)
+   * Bit 29: CCM_PLL_LOCK_EN (Lock Enable)
+   * Bit 28: CCM_PLL_LOCK (Lock Status - Read Only)
+   * Bit 27: CCM_PLL_OUT_EN (Output Enable)
+   * Bits 15:8: N factor (Multiplier: $Rate = 24MHz \times N / M$)
+   * Bits 1:0: M factor (Divider)
+
+In your current configuration, clock_set_pll3 is setting this register to a value like 0xfa004100 (for $N=66$) or 0xfa004200 (for $N=67$), which provides the ~1.6GHz source clock
+  required for your 720x1280 DSI panel.
+
+
 *** Display Controller (~sunxi_de2.c~)
 - Initializes Display Engine 2.0.
 - Only scans for ~sunxi_lcd~ (Parallel) and ~sunxi_dw_hdmi~ (HDMI).
