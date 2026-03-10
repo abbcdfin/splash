@@ -11,8 +11,7 @@ Please use ./tasks.org as the interactive progressing board. You can generate th
 When a task is complete, change the TODO state to DONE in tasks.org and append a log entry under the task headline with the commit hash or file changes.
 
 * understanding
-+ ./display_framework_summary.md is the current understanding of the linux mipi dis driver system.
-+ ./display_framework_u-boot_summary.org is the current understanding of the u-boot display framework.
++ ./linux_display_framework_mipi_dsi.org describe the current understanding of implementation in linux kernel, which should be referenced for u-boot implementation.
 
 Both can help you backporting the existing driver to u-boot.
 

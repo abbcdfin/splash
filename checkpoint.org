@@ -1,0 +1,374 @@
+#+TITLE: MIPI DSI Display Debug Checkpoint
+#+DATE: 2026-03-09
+#+AUTHOR: Debug Session Summary
+
+* Current Status
+** What Works
+- PLL_VIDEO0_4X: 1596 MHz (24 MHz * 133 / 2) ✓
+- PLL clocking verified with readback ✓
+- DSI command transmission in LP mode ✓
+- All 190 panel init commands sent correctly ✓
+- DSI packet headers match Linux kernel exactly ✓
+- DE2 blender pipe 0 enabled (PIPE_CTL = 0x100) ✓
+- exit_sleep_mode (0x11) and set_display_on (0x29) commands sent ✓
+
+** What Doesn't Work
+- No video output on display
+- Direct framebuffer write produces no visible output
+- Display pipeline not producing any pixels despite correct configuration
+
+** Current Hypothesis
+Since DSI commands, clocks, and blender configuration are all correct and match Linux, the issue is likely:
+1. Missing video mode transition in DSI controller
+2. DE2 to TCON to DSI timing/synchronization issue
+3. DSI controller not entering HS video mode after LP command mode
+4. Missing register configuration not visible in current logs
+
+* Technical Background
+
+** Clock Tree (Verified Working)
+- PLL_VIDEO0_4X (CCU 0x040): 1596 MHz
+  - Formula: 24 MHz * N / M
+  - N=133, M=2 (register stores N-1 and M-1)
+  - Register: bits 15:8 = N-1 = 132, bit 1 = M-1 = 1
+  - Derivatives: PLL_VIDEO0_2X (798 MHz), PLL_VIDEO0_1X (399 MHz)
+
+- Display Engine: 399 MHz (PLL_VIDEO0_4X / 4)
+- TCON_LCD0: 399 MHz from PLL_VIDEO0_1X
+- TCON internal dclk: 99.75 MHz (399 / 4 for DSI timing reference)
+- DSI HS bit clock: 399.168 Mbps/lane
+- Pixel clock: 66.528 MHz
+
+** DSI Command Transmission (Verified Working)
+- Commands sent in LP mode using DSI_INST_ID_LPDT
+- Packet format verified against Linux kernel
+- Example matching packet:
+  - U-Boot: DSI_LP: SHORT type=0x15 len=2 pkt=0x03000115 data=01 00
+  - Linux:  DSI_LP: SHORT type=0x15 len=2 pkt=0x03000115 data=
+
+** Critical Registers from Linux (Working System)
+
+*** DSI Controller (Base: 0x05450000)
+- SUN6I_DSI_CTL_REG (0x000): 0x01010001
+- SUN6I_DSI_BASIC_CTL_REG (0x00c): 0x00000000
+  - Correct for sync pulse mode (no burst mode bits)
+- SUN6I_DSI_BASIC_CTL0_REG (0x010): 0x00030001
+  - Bit 16: ECC_EN enabled
+  - Bit 17: CRC_EN enabled
+  - Bit 0: INST_ST (instruction start)
+- **SUN6I_DSI_BASIC_CTL1_REG (0x014): 0x000051f7** ⚠️ CRITICAL
+  - Bit 0: VIDEO_MODE - MUST be set for video output
+  - Bit 1: VIDEO_PRECISION
+  - Bit 2: VIDEO_FILL
+  - Bits 15:4: VIDEO_ST_DELAY(1311) - delay between TCON and DSI video
+
+*** DE2 Blender (Base: MUX0 + 0x1000)
+- PIPE_CTL (0x00): 0x00000100
+  - Bit 8: Enable pipe 0 (REQUIRED for output)
+- ROUTE (0x80): 0x00000001
+  - Pipe 0 source = channel 1
+- ATTR[0].INSIZE (0x08): 0x04ff02cf
+  - (1279 << 16) | 719 for 720x1280
+- OUTSIZE (0x8c): 0x04ff02cf
+- BLD_MODE[0] (0x90): 0x03010301
+- OUTCTL (0xfc): 0x00000000 (progressive)
+
+* Files Modified
+
+** /home/jian/workspace/sys-in/splash/u-boot/arch/arm/include/asm/arch-sunxi/clock_sun50i_h6.h
+*** clock_set_pll3() - Fixed PLL_VIDEO0 calculation
+#+begin_src c
+static inline void clock_set_pll3(unsigned int hz)
+{
+    /* PLL_VIDEO0 formula: 24 MHz * N / M */
+    /* Register: bits 15:8 = N-1, bit 1 = M-1 */
+    u32 m, n;
+
+    /* Special case for 1596 MHz: use N=133, M=2 */
+    if (hz >= 1590000000 && hz <= 1600000000) {
+        n = 133;
+        m = 2;
+    } else {
+        /* General case: M=1 (no divider) */
+        n = hz / 24000000;
+        m = 1;
+    }
+
+    if (n < 8) n = 8;
+    if (n > 255) n = 255;
+
+    u32 reg = readl((u8 *)SUNXI_CCM_BASE + 0x40);
+    reg &= ~((0xff << 8) | (1 << 1)); /* Clear N (15:8) and M (bit 1) */
+    reg |= ((n - 1) << 8) | ((m - 1) << 1);
+    /* Set EN(27), LOCK_EN(29), LDO_EN(25:24), and OUT_EN(31), plus BIT(30) per Linux probe */
+    reg |= BIT(31) | BIT(30) | BIT(29) | BIT(27) | (3 << 24);
+
+    printf("CCU: PLL_VIDEO0 setup: %u Hz (n=%u, m=%u, reg=0x%08x), base=0x%x\n", hz, n, m, reg, SUNXI_CCM_BASE);
+    writel(reg, (u8 *)SUNXI_CCM_BASE + 0x40);
+    mdelay(5);
+
+    int timeout = 2000;
+    while (!(readl((u8 *)SUNXI_CCM_BASE + 0x40) & BIT(28)) && timeout--)
+        udelay(10);
+
+    u32 final = readl((u8 *)SUNXI_CCM_BASE + 0x40);
+    if (timeout <= 0)
+        printf("CCU: PLL_VIDEO0 lock timeout! (reg=0x%08x)\n", final);
+    else
+        printf("CCU: PLL_VIDEO0 locked.\n");
+}
+#+end_src
+
+*** clock_get_pll3() - Fixed readback calculation
+#+begin_src c
+static inline unsigned int clock_get_pll3(void)
+{
+    u32 reg = readl((u8 *)SUNXI_CCM_BASE + 0x40);
+    u32 n = ((reg >> 8) & 0xff) + 1;
+    u32 m = ((reg >> 1) & 0x1) + 1;
+    printf("CCU: PLL_VIDEO0 get: (n=%u, m=%u, reg=0x%08x)\n", n, m, reg);
+    return (n * 24000000) / m;
+}
+#+end_src
+
+** /home/jian/workspace/sys-in/splash/u-boot/drivers/video/sunxi/sunxi_de2.c
+*** Fixed PIPE_CTL register (was mislabeled as fcolor_ctl)
+#+begin_src c
+/* Enable pipe 0 by setting bit 8 in PIPE_CTL register */
+writel(BIT(8), &de_bld_regs->fcolor_ctl); /* Note: mislabeled, actually PIPE_CTL */
+
+/* Added debug output */
+printf("DE2: Blender config: pipe_ctl=0x%08x route=0x%08x bld_mode[0]=0x%08x\n",
+       BIT(8), 1, 0x03010301);
+#+end_src
+
+** /home/jian/workspace/sys-in/splash/u-boot/drivers/video/sunxi/sun6i_mipi_dsi.c
+*** Added detailed DSI LP mode transfer logging
+#+begin_src c
+/* In sun6i_dsi_dcs_write_short() */
+u32 pkt = sun6i_dsi_dcs_build_pkt_hdr(dsi, msg);
+
+printf("DSI_LP: SHORT type=0x%02x len=%zu pkt=0x%08x data=",
+       msg->type, msg->tx_len, pkt);
+if (msg->tx_buf && msg->tx_len > 0) {
+    const u8 *data = msg->tx_buf;
+    for (size_t i = 0; i < msg->tx_len && i < 4; i++)
+        printf("%02x ", data[i]);
+}
+printf("\n");
+
+/* In sun6i_dsi_dcs_write_long() */
+printf("DSI_LP: LONG type=0x%02x len=%zu data=", msg->type, msg->tx_len);
+if (tx_buf && msg->tx_len > 0) {
+    for (size_t i = 0; i < msg->tx_len && i < 16; i++)
+        printf("%02x ", tx_buf[i]);
+    if (msg->tx_len > 16)
+        printf("...");
+}
+printf("\n");
+#+end_src
+
+** /home/jian/openlab/linux/drivers/gpu/drm/sun4i/sun6i_mipi_dsi.c
+*** Added matching logging to Linux kernel driver
+#+begin_src c
+/* In sun6i_dsi_dcs_write_short() */
+u32 pkt = sun6i_dsi_dcs_build_pkt_hdr(dsi, msg);
+const u8 *data = msg->tx_buf;
+
+dev_info(dsi->dev, "DSI_LP: SHORT type=0x%02x len=%zu pkt=0x%08x data=",
+         msg->type, msg->tx_len, pkt);
+if (data && msg->tx_len > 0) {
+    int i;
+    for (i = 0; i < msg->tx_len && i < 4; i++)
+        pr_cont("%02x ", data[i]);
+}
+pr_cont("\n");
+#+end_src
+
+** /home/jian/workspace/sys-in/splash/linux_display_framework_mipi_dsi.org
+*** Added DE2 Blender Configuration section
+Documentation of critical registers verified from Linux kernel, including:
+- PIPE_CTL (0x00): 0x00000100 - Bit 8 enables pipe 0 (REQUIRED)
+- U-Boot bug: Register mislabeled as "fcolor_ctl" in de_bld structure
+- Common mistake: Without PIPE_CTL bit 8 set, blender produces no output
+
+* Key Discoveries
+
+** 1. PLL Clock Calculation Bug
+- Issue: M field is only bit 1, not bits 1:0
+- For 1596 MHz: Must use N=133, M=2 (not N=66, M=1)
+- Register stores (N-1) and (M-1), so bit 1 = 1 means M=2
+
+** 2. DE2 Blender PIPE_CTL Mislabeling
+- U-Boot structure labels register 0x00 as "fcolor_ctl"
+- Actually the PIPE_CTL register
+- Bit 8 must be set to enable pipe 0
+- Bits 3:0 control fill color enable (should be 0 to use channel data)
+
+** 3. DSI Command Transmission Verified
+- All commands sent correctly in LP mode
+- Packet headers match Linux kernel exactly
+- 190 init commands + exit_sleep_mode + set_display_on all correct
+- Command transmission is NOT the issue
+
+** 4. Critical DSI Register: BASIC_CTL1
+- Must have bit 0 (VIDEO_MODE) set for video output
+- Linux sets this in sun6i_dsi_encoder_enable()
+- Value should be 0x000051f7 with VIDEO_ST_DELAY(1311)
+- Without VIDEO_MODE bit, DSI stays in command mode only
+
+* Known Issues and Warnings
+
+** Issues Fixed
+1. ✓ PLL_VIDEO0 clock now 1596 MHz (was 1584 MHz)
+2. ✓ DE2 blender pipe 0 enabled (PIPE_CTL bit 8 set)
+3. ✓ DSI commands transmitted correctly in LP mode
+4. ✓ All clocks verified with readback
+
+** Outstanding Issues
+1. ✗ No video output on display
+2. ✗ Direct framebuffer write shows nothing
+3. ✗ Display pipeline not producing visible output
+4. ? DSI controller may not be transitioning to HS video mode
+5. ? Missing video mode initialization in DSI controller
+
+* Next Steps to Investigate
+
+** Priority 1: DSI Video Mode Transition
+The most likely issue is that DSI controller is not transitioning from LP command mode to HS video mode.
+
+*** Check DSI BASIC_CTL1 Register (0x014)
+- Verify bit 0 (VIDEO_MODE) is set
+- Should be 0x000051f7 in working system
+- If not set, DSI will only do LP commands, no video output
+
+*** Check DSI Video Mode Initialization
+Look at sun6i_dsi_encoder_enable() in Linux kernel:
+1. Sets up video mode parameters
+2. Calculates VIDEO_ST_DELAY
+3. Writes BASIC_CTL1 with VIDEO_MODE bit
+4. Starts video stream
+
+*** Compare with U-Boot
+Check if U-Boot sun6i_dsi_enable() properly:
+1. Sets up video mode timing
+2. Enables VIDEO_MODE bit in BASIC_CTL1
+3. Synchronizes with TCON video start
+
+** Priority 2: Register Dump Comparison
+Create register dumps to compare U-Boot vs Linux:
+- DSI controller registers (0x05450000 + 0x000 to 0x100)
+- DE2 blender registers (MUX0 + 0x1000)
+- TCON registers
+- CCU clock registers
+
+*** Dump Commands
+#+begin_src bash
+# In U-Boot:
+md.l 0x05450000 0x40  # DSI controller
+md.l 0x05000000 0x100 # DE2 mixer
+md.l 0x02001000 0x100 # CCU
+
+# In Linux (as root):
+devmem2 0x05450000 # Read DSI registers
+#+end_src
+
+** Priority 3: TCON to DSI Synchronization
+Verify TCON video timing matches DSI video timing:
+- TCON starts sending video data
+- DSI must be in video mode to receive it
+- Timing mismatch could cause black screen
+
+** Priority 4: Linux Kernel Reference
+Read sun6i_dsi_encoder_enable() carefully:
+- File: /home/jian/openlab/linux/drivers/gpu/drm/sun4i/sun6i_mipi_dsi.c
+- Function enables DSI video mode
+- Compare with U-Boot sun6i_dsi_enable()
+
+* Debug Commands
+
+** U-Boot Commands to Test
+#+begin_src bash
+# Test framebuffer write (should show white screen if pipeline works)
+mw.l 0x4e000000 0xFFFFFFFF 0x100000
+
+# Read DSI controller registers
+md.l 0x05450000 0x40
+
+# Read CCU clock registers
+md.l 0x02001040 1  # PLL_VIDEO0
+md.l 0x02001b60 1  # TCON_LCD0_CLK
+md.l 0x02001b24 1  # MIPI_DSI_CLK
+
+# Read DE2 blender registers
+md.l 0x05101000 0x40
+#+end_src
+
+** Linux Kernel Debug
+#+begin_src bash
+# Enable DRM debug
+echo 0x1f > /sys/module/drm/parameters/debug
+
+# Check DSI status
+cat /sys/kernel/debug/dri/0/state
+
+# Monitor kernel logs
+dmesg -w | grep -i dsi
+#+end_src
+
+* Reference Files
+
+** U-Boot Source
+- /home/jian/workspace/sys-in/splash/u-boot/drivers/video/sunxi/sun6i_mipi_dsi.c
+- /home/jian/workspace/sys-in/splash/u-boot/drivers/video/sunxi/sunxi_de2.c
+- /home/jian/workspace/sys-in/splash/u-boot/arch/arm/include/asm/arch-sunxi/clock_sun50i_h6.h
+
+** Linux Kernel Reference
+- /home/jian/openlab/linux/drivers/gpu/drm/sun4i/sun6i_mipi_dsi.c
+- /home/jian/openlab/linux/drivers/gpu/drm/sun4i/sun8i_ui_layer.c
+- /home/jian/openlab/linux/drivers/gpu/drm/sun4i/sun8i_mixer.h
+
+** Documentation
+- /home/jian/workspace/sys-in/splash/linux_display_framework_mipi_dsi.org
+- /home/jian/workspace/sys-in/splash/evidence.org
+
+** Log Files
+- /home/jian/workspace/sys-in/splash/yes_display.dmesg - Working Linux kernel log
+- /home/jian/workspace/sys-in/splash/no_display.dmesg - Non-working U-Boot log
+
+* Git Status
+Branch: vc-cc
+Main branch: master
+
+Modified files:
+- u-boot (submodule modified)
+
+Untracked files:
+- dump_ccu.sh
+- dump_display_settings.sh
+- evidence.org
+- linux (directory)
+- linux_display_framework_mipi_dsi.org
+- linux_drm_init.org
+- linxu_display_framework_mipi_dsi.html
+- no_display.dmesg
+- yes_display.dmesg
+
+Recent commits:
+- f579fa1 dev: adding debug information.
+- 632a718 dev: wip, debugging video related clock initialization.
+- 6b9fac9 dev: wip, debugging clock initialisation.
+
+* Environment
+- Platform: Allwinner T113-S (sun20i-d1 variant)
+- Board: Custom board with ILI9881C panel
+- Panel: 720x1280, 4-lane MIPI DSI, video mode
+- U-Boot: Custom build with MIPI DSI support
+- Linux: Working kernel 6.x with DRM display support
+
+* Contact Points for Questions
+If resuming this session, focus on:
+1. Why DSI controller is not producing video output despite correct commands
+2. Whether BASIC_CTL1 register bit 0 (VIDEO_MODE) is being set in U-Boot
+3. Comparing register dumps between working Linux and non-working U-Boot
+4. TCON to DSI video mode synchronization timing

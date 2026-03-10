@@ -71,3 +71,74 @@
 - **Bus Gates:** Enables AHB/APB access to peripheral registers.
   - BUS_DE (0x60c), BUS_DPSS_TOP (0xabc), BUS_MIPI_DSI (0xb4c), BUS_TCON_LCD0 (0xb7c).
   - *Structure:* Bit 0 = Clock Gate, Bit 16 = Reset De-assertion.
+
+* DSI Controller Register Values (Working Linux System)
+
+** Panel Configuration (ILI9881C)
+   - **mode_flags:** 0x00000c05
+     - Bit 0: MIPI_DSI_MODE_VIDEO (0x001)
+     - Bit 2: MIPI_DSI_MODE_VIDEO_SYNC_PULSE (0x004)
+     - Bit 10: MIPI_DSI_MODE_LPM (0x400)
+     - Bit 11: MIPI_DSI_MODE_EOT_PACKET (0x800)
+   - **Mode:** SYNC_PULSE (non-burst video mode)
+   - **Lanes:** 4
+
+** Critical DSI Registers (After Enable)
+   - **SUN6I_DSI_CTL_REG (0x000):** 0x01010001
+
+   - **SUN6I_DSI_BASIC_CTL_REG (0x00c):** 0x00000000
+     - This is CORRECT for sync pulse mode
+     - Burst mode would have bits set: VIDEO_BURST | HSA_HSE_DIS | HBP_DIS
+     - Sync pulse mode uses blanking packets instead, so BASIC_CTL = 0
+
+   - **SUN6I_DSI_BASIC_CTL0_REG (0x010):** 0x00030001
+     - Bit 16 (0x10000): ECC_EN - Error Correction Code enabled
+     - Bit 17 (0x20000): CRC_EN - Cyclic Redundancy Check enabled
+     - Bit 0 (0x00001): INST_ST - Instruction start (set by hardware during operation)
+
+   - **SUN6I_DSI_BASIC_CTL1_REG (0x014):** 0x000051f7 ⚠️ **CRITICAL**
+     - Bit 0 (0x0001): **VIDEO_MODE** - Enables video mode output
+     - Bit 1 (0x0002): VIDEO_PRECISION - Precision mode for video timing
+     - Bit 2 (0x0004): VIDEO_FILL - Fill mode enabled
+     - Bits 15:4 (0x51f0): VIDEO_ST_DELAY(1311) - Video start delay = 1311 clocks
+     - **If bit 0 is NOT set, DSI will not output video stream!**
+
+** VIDEO_ST_DELAY Calculation
+   - **Value:** 1311 clocks
+   - **Calculation:** delay = sun6i_dsi_get_video_start_delay(dsi, mode)
+   - **Purpose:** Delay between TCON starting and DSI video output
+   - **Critical for sync:** Ensures proper timing between TCON and DSI
+
+** Key Takeaway
+   The most critical register is **BASIC_CTL1 (0x014)**.
+   - **Bit 0 (VIDEO_MODE)** must be set to 1, or no video output will occur
+   - This bit is written during sun6i_dsi_encoder_enable() initialization
+   - Formula: BASIC_CTL1 = VIDEO_ST_DELAY(delay) | VIDEO_FILL | VIDEO_PRECISION | VIDEO_MODE
+   - For working system: 0x000051f7 = (1311 << 4) | 0x7
+
+* DE2 Blender Configuration (Base: MUX0 + 0x1000)
+
+** Critical Registers (Verified from Linux Kernel)
+   - **PIPE_CTL (0x00):** 0x00000100
+     - Bit 8: PIPE_CTL_EN(0) - Enable pipe 0 (required for output!)
+     - Bits 3:0: FC_EN - Fill color enable (0 = use channel data, not fill color)
+     - Linux: sun8i_ui_layer_enable() sets BIT(8 + zpos)
+     - U-Boot bug: Register mislabeled as "fcolor_ctl" in de_bld structure
+
+   - **ROUTE (0x80):** 0x00000001
+     - Bits 3:0: Pipe 0 source = channel 1 (UI channel with framebuffer)
+     - Linux: Sets (channel << PIPE_SHIFT(zpos))
+
+   - **ATTR[0].INSIZE (0x08):** 0x04ff02cf
+     - Format: (height-1) << 16 | (width-1)
+     - For 720x1280: (1279 << 16) | 719
+
+   - **OUTSIZE (0x8c):** 0x04ff02cf (same as INSIZE for 1:1 output)
+
+   - **BLD_MODE[0] (0x90):** 0x03010301 (standard alpha blending)
+
+   - **OUTCTL (0xfc):** 0x00000000 (progressive) or 0x00000002 (interlaced)
+     - Only bit 1 (INTERLACED) is defined
+
+** Common Mistake
+   Without PIPE_CTL bit 8 set, pipe 0 is disabled and blender produces no output, even if all other registers are correct.
