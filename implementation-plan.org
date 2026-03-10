@@ -120,18 +120,184 @@ Panel initialization and device tree integration.
 - Set =CONFIG_SPLASH_SOURCE= and boot environment
 - Verify splash displays during boot
 
+* Phase 5: Seamless Kernel Handoff
+Minimize display disruption when Linux takes over the display pipeline from U-Boot.
+
+There are two disruption windows to address:
+- *Window 1*: U-Boot ends → kernel =simplefb= driver takes over (eliminatable)
+- *Window 2*: =simplefb= active → DRM/KMS driver reinitializes pipeline (minimizable)
+
+** 5.1 Eliminate Window 1: simplefb framebuffer handoff [DONE]
+
+Both changes below are required together — neither is verifiable alone.
+U-Boot needs to know to emit the simplefb node, and the kernel DTS needs
+the stub node for U-Boot to find and populate.
+
+*U-Boot*: add to =configs/raft-gw-argon-vb_defconfig=:
+#+begin_src
+CONFIG_OF_BOARD_SETUP=y
+CONFIG_VIDEO_DT_SIMPLEFB=y
+#+end_src
+
+=sunxi_simplefb_setup()= in =drivers/video/sunxi/sunxi_de2.c= is already wired into
+=ft_board_setup()= in =board/sunxi/board.c=. It patches the kernel DTB at boot time to
+activate the stub node with U-Boot's live framebuffer address, resolution and stride, so
+the kernel =simplefb= driver inherits the display without touching hardware.
+
+*Kernel DTS*: =sunxi_simplefb_fdt_match()= requires a pre-existing node with
+=compatible = "allwinner,simple-framebuffer"= and =allwinner,pipeline = "mixer0-lcd0"=.
+Add to the =chosen= node in
+=arch/arm/boot/dts/allwinner/sun8i-t113s-raft-gw-argon-vb.dts=:
+
+#+begin_src dts
+#include <dt-bindings/clock/sun20i-d1-ccu.h>
+
+chosen {
+    stdout-path = "serial0:115200n8";
+    #address-cells = <1>;
+    #size-cells = <1>;
+    ranges;
+
+    framebuffer-lcd0 {
+        compatible = "allwinner,simple-framebuffer", "simple-framebuffer";
+        allwinner,pipeline = "mixer0-lcd0";
+        clocks = <&ccu CLK_BUS_DE>, <&ccu CLK_DE>,
+                 <&ccu CLK_BUS_TCON_LCD0>, <&ccu CLK_TCON_LCD0>,
+                 <&ccu CLK_MIPI_DSI>;
+        status = "disabled";
+    };
+};
+#+end_src
+
+The =clocks= property instructs =simplefb= to hold the display pipeline clocks enabled
+for as long as it is the active framebuffer driver.
+
+Clock IDs (from =include/dt-bindings/clock/sun20i-d1-ccu.h=):
+| Clock             | ID  |
+|-------------------+-----|
+| CLK_DE            |  27 |
+| CLK_BUS_DE        |  28 |
+| CLK_MIPI_DSI      | 110 |
+| CLK_TCON_LCD0     | 112 |
+| CLK_BUS_TCON_LCD0 | 113 |
+
+*Verification*:
+- [X] Kernel boot log contains: =simple-framebuffer 4e000000.framebuffer: fb0: simplefb registered!=
+- [X] Splash image remains visible continuously from U-Boot through early kernel init
+- [X] No black screen gap before DRM driver loads
+
+** 5.2 Minimize Window 2: skip panel reset on first boot
+
+When the =sun4i-drm= DRM driver takes over from =simplefb=, =ili9881c_prepare()= performs
+a full panel reset (reset high → 20 ms → reset low → 20 ms) followed by the complete DCS
+init sequence. This causes an unavoidable ~200–400 ms black screen.
+
+To eliminate the reset on first boot (panel already configured by U-Boot), add
+=panel-skip-init= property support to =ili9881c_prepare()=:
+
+In =drivers/gpu/drm/panel/panel-ilitek-ili9881c.c=:
+#+begin_src c
+/* Use a static flag so skip applies only on the first prepare() after boot.
+ * Subsequent prepare() calls (e.g. after suspend/resume) do a full init. */
+static bool ili9881c_first_boot = true;
+
+static int ili9881c_prepare(struct drm_panel *panel)
+{
+    struct ili9881c *ctx = panel_to_ili9881c(panel);
+
+    if (ili9881c_first_boot &&
+        of_property_read_bool(ctx->dsi->dev.of_node, "panel-skip-init")) {
+        dev_info(panel->dev, "Skipping panel init (already configured by bootloader)\n");
+        ili9881c_first_boot = false;
+        return 0;
+    }
+    ili9881c_first_boot = false;
+
+    /* ... existing reset + init sequence ... */
+}
+#+end_src
+
+Also add =panel-skip-init= to the =panel@0= node in the kernel DTS:
+#+begin_src dts
+panel@0 {
+    compatible = "huadichuangxian,hd50004c30", "ilitek,ili9881c";
+    /* ... existing properties ... */
+    panel-skip-init;
+};
+#+end_src
+
+Both changes are required together: the DT property has no effect without the driver
+support, and the driver guard does nothing without the DT property.
+
+*Verification*:
+- [ ] Kernel log shows: =Skipping panel init (already configured by bootloader)=
+- [ ] No visible black screen flash during DRM/KMS takeover
+- [ ] Suspend/resume still performs full panel re-initialization (skip is first-boot only)
+- [ ] Hard reboot (without power cycle) still initializes panel correctly
+
+** 5.3 Keep display active during application startup: framebuffer console
+
+Even after step 5.2 eliminates the panel reset flash, the display may go blank
+between DRM initialization and the first frame drawn by the application. Enabling
+the kernel framebuffer console fills this gap — boot messages print to the LCD
+continuously, keeping the display active until userspace takes over.
+
+With =simplefb= already registered as =fb0=, this requires only two Kconfig lines in
+=arch/arm/configs/raft-gw-argon-vb_defconfig=:
+
+#+begin_src
+CONFIG_FRAMEBUFFER_CONSOLE=y
+CONFIG_FRAMEBUFFER_CONSOLE_DETECT_PRIMARY=y
+#+end_src
+
+The resulting boot sequence:
+
+#+begin_example
+U-Boot splash
+    ↓  [Window 1: eliminated by step 5.1]
+simplefb registered as fb0
+    ↓  [Window 2: eliminated by step 5.2]
+DRM takes over — fbcon switches to DRM fbdev emulation
+Kernel/userspace boot messages visible on LCD
+    ↓
+Application clears screen and displays its UI
+#+end_example
+
+Optional additions:
+- =CONFIG_LOGO=y= + =CONFIG_LOGO_LINUX_CLUT224=y= — shows Tux logo before console text
+- =CONFIG_FONT_8x16=y= — larger font for 720×1280 display
+
+*Note*: The application should clear the screen explicitly on startup rather than
+assuming a blank framebuffer.
+
+*Verification*:
+- [ ] Kernel boot messages visible on LCD during boot
+- [ ] Display never goes blank between U-Boot and application start
+- [ ] Application can clear screen and render normally on top of fbcon
+
 * Dependencies Graph
 #+begin_example
   1.1 CCU Clocks ──┐
                     ├──→ 2.1 DSI Controller ──┐
   1.2 D-PHY ───────┘                          │
-                                               ├──→ 3.2 Device Tree ──→ 4.1 Build
-  2.2 TCON DSI Mode ───────────────────────────┤
-                                               │
+                                               ├──→ 3.2 Device Tree ──→ 4.1 Build ──→ 5.1 simplefb handoff [DONE]
+  2.2 TCON DSI Mode ───────────────────────────┤                                  ──→ 5.2 Panel skip-init
+                                               │                                  ──→ 5.3 fbcon on LCD
   2.3 DE2 Extension ───────────────────────────┤
                                                │
   3.1 ILI9881C Panel ─────────────────────────┘
 #+end_example
+
+* Phase Status
+| Phase | Step | Description                              | Status  |
+|-------+------+------------------------------------------+---------|
+|     1 |      | Clock and PHY Foundation                 | DONE    |
+|     2 |      | Display Pipeline Drivers                 | DONE    |
+|     3 |      | Panel and Device Tree                    | DONE    |
+|     4 |      | Integration, Testing                     | DONE    |
+|     5 |  5.1 | simplefb handoff (U-Boot + kernel DTS)   | DONE    |
+|     5 |  5.2 | Panel skip-init (driver + DTS property)  | PLANNED |
+|     5 |  5.3 | Framebuffer console (boot msgs on LCD)   | PLANNED |
 
 * Risk Assessment
 - *Clock tree*: T113-S CCU may not have full MIPI DSI clock support in U-Boot yet. Mitigation: direct register programming if DM clock driver lacks entries.

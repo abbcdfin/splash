@@ -625,7 +625,133 @@ After ~sun6i_dsi_enable()~, read BASIC_CTL0 (0x05450010) after a 500ms delay:
 6. *Bus clock must precede mod clock* — enabling mod clock first with bus clock off can hang the CPU
 7. *Double-buffer commit* (~dbuff=1~) must be written after each batch of DE2 register changes
 
-* 10. Reference Files
+* 10. Seamless Kernel Handoff (Phase 5)
+
+** 10.1 Disruption Windows
+
+When Linux boots, the display pipeline passes through multiple drivers. Each
+transition is a potential disruption window:
+
+#+begin_example
+U-Boot (sun6i DSI driver, splash screen active)
+    ↓  [Window 1] ~1–2 s — U-Boot ends, kernel boots, no one owns display
+simplefb (kernel inherits U-Boot's live framebuffer)
+    ↓  [Window 2] ~200–400 ms — DRM takes over, panel reset in ili9881c_prepare()
+sun4i-drm + sun6i-dsi (full KMS stack)
+    ↓  [Window 3] variable — app loading time, display blank until first modeset
+Application UI
+#+end_example
+
+** 10.2 Window 1 Eliminated: simplefb Handoff [DONE]
+
+=sunxi_simplefb_setup()= in =board/sunxi/board.c= patches the kernel DTB at boot
+time (called from =ft_board_setup()= during =booti=) to activate a pre-existing stub
+node in the kernel DTS. The kernel's =simplefb= driver then attaches to the live
+U-Boot framebuffer — no hardware reconfiguration, no visible gap.
+
+*Required U-Boot config* (=configs/raft-gw-argon-vb_defconfig=):
+#+begin_src
+CONFIG_OF_BOARD_SETUP=y
+CONFIG_VIDEO_DT_SIMPLEFB=y
+#+end_src
+
+*Required kernel DTS stub* (=chosen= node in board DTS):
+#+begin_src dts
+framebuffer-lcd0 {
+    compatible = "allwinner,simple-framebuffer", "simple-framebuffer";
+    allwinner,pipeline = "mixer0-lcd0";
+    clocks = <&ccu CLK_BUS_DE>, <&ccu CLK_DE>,
+             <&ccu CLK_BUS_TCON_LCD0>, <&ccu CLK_TCON_LCD0>,
+             <&ccu CLK_MIPI_DSI>;
+    status = "disabled";  /* U-Boot patches to "okay" at runtime */
+};
+#+end_src
+
+The =clocks= list keeps all display pipeline clocks gated on while simplefb is the
+active framebuffer owner. Pipeline name =mixer0-lcd0= identifies the T113-S DSI path.
+
+*Confirmed working* — kernel log:
+#+begin_example
+[1.363582] simple-framebuffer 4e000000.framebuffer: framebuffer at 0x4e000000, 0x384000 bytes
+[1.363643] simple-framebuffer 4e000000.framebuffer: format=x8r8g8b8, mode=720x1280x32, linelength=2880
+[1.364218] simple-framebuffer 4e000000.framebuffer: fb0: simplefb registered!
+[1.381193] sun4i-drm display-engine: bound 5100000.mixer ...
+[3.212610] sun6i-mipi-dsi 5450000.dsi: Attached device hd50004c30
+#+end_example
+
+⚠️ *=ft_board_setup()= is NOT called during manual =run bmp-disp=.* It is only invoked
+by =booti=/=bootm= when an FDT blob is passed. This caused early confusion where
+simplefb setup appeared to not run.
+
+** 10.3 CONFIG_DRM_SIMPLEDRM Causes Kernel Crash — Do Not Enable
+
+Enabling =CONFIG_DRM_SIMPLEDRM=y= with =sun4i-drm= causes a NULL pointer dereference:
+
+#+begin_example
+Unable to handle kernel NULL pointer dereference at virtual address 00000004
+PC is at of_drm_find_panel+0x5c
+LR is at sun6i_dsi_attach+0x34
+#+end_example
+
+Root cause: two DRM drivers bind simultaneously (simpledrm on minor 0, sun4i-drm on
+minor 1). When sun4i-drm calls =drm_aperture_remove_conflicting_framebuffers()= to
+evict simpledrm, it corrupts the DRM panel list mid-probe. =of_drm_find_panel= in
+=sun6i_dsi_attach= then dereferences the stale list entry.
+
+*Correct approach*: use =CONFIG_FB=y= + =CONFIG_FB_SIMPLE=y= (legacy fbdev). The fbdev
+simplefb driver has no DRM conflict and does not trigger the aperture eviction path.
+
+** 10.4 Window 2 Plan: Panel Skip-Init [PLANNED]
+
+Add =panel-skip-init= property to the kernel DTS =panel@0= node and guard
+=ili9881c_prepare()= to skip the reset on first boot:
+
+#+begin_src dts
+panel@0 {
+    compatible = "huadichuangxian,hd50004c30", "ilitek,ili9881c";
+    panel-skip-init;
+    /* ... other properties unchanged ... */
+};
+#+end_src
+
+#+begin_src c
+static bool ili9881c_first_boot = true;
+
+static int ili9881c_prepare(struct drm_panel *panel)
+{
+    struct ili9881c *ctx = panel_to_ili9881c(panel);
+
+    if (ili9881c_first_boot &&
+        of_property_read_bool(ctx->dsi->dev.of_node, "panel-skip-init")) {
+        dev_info(panel->dev, "Skipping panel init (already configured by bootloader)\n");
+        ili9881c_first_boot = false;
+        return 0;
+    }
+    ili9881c_first_boot = false;
+    /* ... existing reset + DCS init sequence ... */
+}
+#+end_src
+
+The static flag ensures the skip applies only once per boot; suspend/resume cycles
+will perform the full re-initialization as expected.
+
+** 10.5 Window 3 Plan: Framebuffer Console [PLANNED]
+
+Enable the kernel framebuffer console so boot messages print to the LCD continuously,
+keeping the display active from DRM takeover until the application's first frame:
+
+#+begin_src
+CONFIG_FRAMEBUFFER_CONSOLE=y
+CONFIG_FRAMEBUFFER_CONSOLE_DETECT_PRIMARY=y
+#+end_src
+
+With =FB_SIMPLE= registered as =fb0=, fbcon attaches automatically. When sun4i-drm
+loads, fbcon migrates to DRM fbdev emulation. The display shows kernel/userspace boot
+messages throughout — no blank screen between DRM init and app start.
+
+Optional: =CONFIG_LOGO=y= + =CONFIG_LOGO_LINUX_CLUT224=y= shows Tux logo before console text.
+
+* 11. Reference Files
 
 ** U-Boot Source
 
