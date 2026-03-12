@@ -1,129 +1,13 @@
 #+TITLE: Project Splash - Session Checkpoint
-#+DATE: 2026-03-12
-#+AUTHOR: Session Summary
+#+DATE: [2026-03-12 Thu]
 
-* Current Status
-** What Works
-- U-Boot MIPI DSI splash screen ✓ (full pipeline: DE2 → TCON → DSI → ILI9881C)
-- PLL_VIDEO0_4X: 1596 MHz (N=133, M=2) ✓
-- All 190 panel DCS init commands sent correctly in LP mode ✓
-- DSI HS video mode output ✓
-- DE2 blender pipe 0 enabled (PIPE_CTL bit 8) ✓
-- Phase 5.1: simplefb handoff from U-Boot to kernel ✓
-  - U-Boot patches kernel DTB at runtime to activate framebuffer-lcd0 node
-  - Kernel simplefb driver inherits U-Boot framebuffer without touching hardware
-  - Splash visible from U-Boot through early kernel init
-- Phase 5.2 (partial): Panel skip-init on first DRM takeover ✓
-  - =ili9881c_prepare()= and =ili9881c_enable()= skip reset+reinit on first call
-  - Confirmed by dmesg: "Skipping panel init (already configured by bootloader)"
-  - =panel-skip-init= DT property added to panel@0 node in kernel DTS
+* Critical Discoveries (T113-S / NCAT2)
+- CCSC01 Offset: Found correct offset is 0xFA050 (relative to DE2 mixer base). 0xFA000 is FCC1 base.
+- TCON CCIR CSC: Bit 19 of TCON0_HV_IF_REG (0x58) must be set to 1 to disable unwanted color conversion.
+- Panel Command: ILI9881C init command 0xCF confirmed as correct (replaces 0xBF).
+- IC Version: Register 0x03000024 bits 0-2 contain IC version; affects D-PHY ANA1 bit 5.
 
-** In Progress
-
-*** Phase 5.2: D-PHY skip (DEFERRED — user accepts <1s blank)
-- =sun6i_dsi_encoder_enable()= still reinitializes D-PHY on first DRM takeover
-- This causes ~150ms blank during D-PHY reinit — accepted for now
-- Planned fix: check =panel-skip-init= property in encoder_enable, skip =phy_init=
-  - Use =of_property_read_bool(device->dev.of_node, "panel-skip-init")=
-  - NOT =device_property_read_bool= (caused debug log to never appear)
-  - Also skip =phy_exit= in encoder_disable for the first cycle to keep refcounts balanced
-- Files: =/home/jian/openlab/linux/drivers/gpu/drm/sun4i/sun6i_mipi_dsi.c=
-
-*** Phase 5.3: Framebuffer console (NEXT — pending defconfig edit)
-- Root cause: DRM probes at ~t=1.4s, removes simplefb, but drm-splash doesn't
-  modeset until ~t=31s → 30-second blank window
-- Fix: enable fbcon so boot messages keep display active from DRM init onwards
-- Changes needed in =arch/arm/configs/raft-gw-argon-vb_defconfig=:
-  #+begin_src
-  CONFIG_DRM_FBDEV_EMULATION=y
-  CONFIG_FRAMEBUFFER_CONSOLE=y
-  CONFIG_FRAMEBUFFER_CONSOLE_DETECT_PRIMARY=y
-  #+end_src
-- Build: regenerate .config from defconfig (old .config won't have new symbols)
-  #+begin_src bash
-  cd ~/Downloads/b-linux
-  source ~/.scripts/setup-oe.sh
-  rmake ~/workspace/sys-in/splash/linux raft-gw-argon-vb_defconfig
-  rmake ~/workspace/sys-in/splash/linux zImage -j$(nproc)
-  #+end_src
-- Deploy:
-  #+begin_src bash
-  sshpass -p " " scp arch/arm/boot/zImage root@192.168.13.100:/mnt/
-  ssh root@192.168.13.100 reboot
-  #+end_src
-- Verification: boot messages should appear on LCD from ~t=1.4s; display stays
-  active until drm-splash or LVGL app takes over
-
-** Paused
-- Phase 5.4: initramfs one-shot splash (pre-systemd display)
-  - Goal: eliminate blank window from kernel boot to systemd (~13s)
-  - Requires statically-linked drm-set-splash binary in initramfs
-  - Deferred until 5.2 and 5.3 are complete and tested
-
-* Architecture: Seamless Boot Display Pipeline
-
-#+begin_example
-U-Boot splash
-    ↓  [Phase 5.1 DONE: simplefb handoff — no gap]
-simplefb active as fb0 (kernel inherits U-Boot framebuffer)
-    ↓  [Phase 5.2 IN PROGRESS: panel skip — ~150ms D-PHY reinit still present]
-DRM takes over (~t=1.4s)
-    ↓  [Phase 5.3 NEXT: fbcon keeps display active]
-Boot messages on LCD (fbcon via DRM fbdev emulation)
-    ↓  [Phase 5.4 PAUSED: initramfs splash not yet implemented]
-drm-splash service starts (~t=31s) — renders splash image
-    ↓
-LVGL app starts — drm-splash exits, app renders UI
-#+end_example
-
-* Key File Locations
-
-** Kernel (out-of-tree build in ~/Downloads/b-linux)
-- Source tree: ~/workspace/sys-in/splash/linux  →  ~/openlab/linux (same repo)
-- Board defconfig: =arch/arm/configs/raft-gw-argon-vb_defconfig=
-- Kernel DTS: =arch/arm/boot/dts/allwinner/sun8i-t113s-raft-gw-argon-vb.dts=
-- Panel driver: =drivers/gpu/drm/panel/panel-ilitek-ili9881c.c=
-- DSI controller: =drivers/gpu/drm/sun4i/sun6i_mipi_dsi.c=
-
-** U-Boot
-- Source: ~/workspace/sys-in/splash/u-boot (git submodule)
-- DSI driver: =drivers/video/sunxi/sun6i_mipi_dsi.c=
-- DE2 driver: =drivers/video/sunxi/sunxi_de2.c=
-- CCU clocks: =arch/arm/include/asm/arch-sunxi/clock_sun50i_h6.h=
-
-** Target Board
-- IP: 192.168.13.100 (DHCP, usually stable)
-- SSH: root, password is single space =" "=
-- Serial: /dev/ttyUSB0, 115200 baud
-- Boot files on target: =/mnt/zImage=, =/mnt/sunxi.dtb=
-
-* Critical Hardware Knowledge
-
-** PLL_VIDEO0 Clock (CCU 0x040)
-- Formula: 24 MHz * N / M
-- M field is BIT 1 ONLY (not bits 1:0)
-- For 1596 MHz: N=133, M=2 (register stores N-1 and M-1)
-
-** DE2 Blender
-- Register at offset 0x00 is PIPE_CTL (mislabeled "fcolor_ctl" in U-Boot struct)
-- Must set bit 8 to enable pipe 0, otherwise no output
-
-** DSI Controller
-- BASIC_CTL1 (0x014) bit 0 = VIDEO_MODE must be set for video output
-- Linux working value: 0x000051f7 (VIDEO_ST_DELAY=1311)
-- LP mode for DCS commands, HS mode for video stream
-
-** panel-skip-init Pattern
-- Use =of_property_read_bool(ctx->dsi->dev.of_node, "panel-skip-init")=
-- NOT =device_property_read_bool= (fwnode may not be set up, debug log never appeared)
-- Static first-boot flag ensures skip only applies once (suspend/resume still reinits)
-
-* Modified Files Summary
-
-| File | Change | Status |
-|------+--------+--------|
-| =linux/arch/arm/configs/raft-gw-argon-vb_defconfig= | Add fbcon config (Phase 5.3) | PENDING |
-| =linux/arch/arm/boot/dts/allwinner/sun8i-t113s-raft-gw-argon-vb.dts= | panel-skip-init, simplefb node | DONE |
-| =linux/drivers/gpu/drm/panel/panel-ilitek-ili9881c.c= | skip-init on first prepare/enable | DONE |
-| =linux/drivers/gpu/drm/sun4i/sun6i_mipi_dsi.c= | D-PHY skip (deferred) | DEFERRED |
-| =u-boot/configs/raft-gw-argon-vb_defconfig= | OF_BOARD_SETUP, VIDEO_DT_SIMPLEFB | DONE |
+* Status
+- Fidelity fixes for "warmish color" implemented in sunxi_de2.c and lcdc.c.
+- Panel driver updated with correct 0xCF command and standard reset sequence.
+- All drivers cross-compiled successfully.

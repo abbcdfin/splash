@@ -842,3 +842,64 @@ sshpass -p " " scp ~/Downloads/b-linux/arch/arm/boot/dts/allwinner/sun8i-t113s-r
 |-------------------------+-----------------------------------------------------------|
 | ~yes_display.dmesg~     | Linux kernel log when display works (reference state)     |
 | ~no_display.dmesg~      | Linux kernel log after U-Boot failed (shows DSI state)    |
+
+* 13. Color Fidelity & Initialization Quirks (NCAT2/T113-S)
+
+Discovered during investigation of intermittent "warmish color" issues on warm reboots.
+
+** 13.1 CCSC (Channel Color Space Conversion) Offsets
+
+On NCAT2 (D1/T113-S), the CCSC register offsets differ from other DE2.0 SoCs. Stale values from a previous boot (e.g. Linux YUV playback) can cause color distortion if not explicitly cleared.
+
+| Channel | Unit | Offset (relative to mixer base) | Purpose |
+|---------+------+---------------------------------+---------|
+| 0 (VI)  | FCC0 | 0xAA000                         | Base of VI0 enhancement unit |
+| 0 (VI)  | CCSC | 0xAA050                         | VI0 Color Space Conversion |
+| 1 (UI)  | FCC1 | 0xFA000                         | Base of UI1 enhancement unit |
+| 1 (UI)  | CCSC | 0xFA050                         | UI1 Color Space Conversion |
+
+⚠️ *Critical:* Many U-Boot drivers incorrectly use 0xFA000 for CCSC01. The correct offset for the CSC control register is *0xFA050*.
+
+** 13.2 TCON CCIR CSC Disable
+
+In DSI Video/Burst modes, the TCON must explicitly disable CCIR color space conversion to avoid "warm" or "sepia" color shifts.
+
+- *Register*: ~TCON0_HV_IF_REG~ (Offset 0x58)
+- *Bit*: 19 (~ccir_csc_dis~)
+- *Action*: Set to 1 to disable conversion.
+
+** 13.3 ILI9881C Panel Initialization Fixes
+
+- *Command 0xCF*: Often misidentified as 0xBF in some driver sources. Allwinner's source confirms command 0xCF with data 0x23 is correct for this panel variant.
+- *Reset Sequence*: Standard stable sequence is:
+  1. Pull Reset LOW.
+  2. Enable Power Supplies.
+  3. Wait 20ms.
+  4. Release Reset (HIGH).
+  5. Wait 120ms (stabilization) before sending DCS commands.
+
+** 13.4 VEP (Video Enhancement Processor) Clearing
+
+To ensure a "clean" bootloader display, all VEP unit bases should be written with 0. For NCAT2 Channel 1, these start at 0xF0000 (FCE), 0xF2000 (BWS), 0xF4000 (LTI), 0xF6000 (PEAK), 0xF8000 (ASE).
+
+* 14. Implementation Reference
+
+** 14.1 Source (Linux v6.10 Backport Origin)
+
+- =sun6i_mipi_dsi.c= — DSI controller, register-based, no interrupts.
+- =phy-sun6i-mipi-dphy.c= — D-PHY timing and lane configuration.
+- =sun4i_tcon.c= — TCON LCD with DSI mode support.
+- =sun8i_tcon_top.c= — TCON mux/routing logic.
+- =sun8i_mixer.c= — DE2 mixer/blender configuration.
+- =panel-ilitek-ili9881c.c= — Panel initialization sequences.
+- =sunxi-d1s-t113.dtsi= — DSI node definitions (compatible ="allwinner,sun50i-a100-mipi-dsi"=).
+
+** 14.2 Target (U-Boot v2026.04 Integration)
+
+Existing U-Boot infrastructure utilized or extended:
+- =drivers/video/mipi_dsi.c= — Generic MIPI DSI host framework.
+- =drivers/video/dsi_host-uclass.c= — DSI host DM uclass.
+- =include/mipi_dsi.h= — MIPI DSI structures and APIs.
+- =drivers/video/sunxi/sunxi_de2.c= — DE2 driver (extended for DSI path).
+- =drivers/video/sunxi/lcdc.c= — TCON register programming and TRI timing.
+- =drivers/video/panel-uclass.c= — Panel driver model framework.

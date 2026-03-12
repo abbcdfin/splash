@@ -1,6 +1,6 @@
 #+TITLE: Project Splash - Implementation Plan
 #+AUTHOR: Jian
-#+DATE: [2026-02-10 Mon]
+#+DATE: [2026-03-12 Thu]
 #+STARTUP: showall
 
 * Overview
@@ -8,343 +8,53 @@ Backport the MIPI DSI display pipeline from Linux v6.10 to U-Boot v2026.04 for A
 
 Pipeline: DE2 Mixer → TCON Top → TCON LCD0 → DSI Controller → D-PHY → ILI9881C Panel
 
-** Source (Linux v6.10)
-- =sun6i_mipi_dsi.c= (1,262 lines) - DSI controller, register-based, no interrupts
-- =phy-sun6i-mipi-dphy.c= (648 lines) - D-PHY timing and lane config
-- =sun4i_tcon.c= (1,581 lines) - TCON LCD with DSI mode support
-- =sun8i_tcon_top.c= (312 lines) - TCON mux/routing
-- =sun8i_mixer.c= (724 lines) - DE2 mixer/blender
-- =panel-ilitek-ili9881c.c= (2,072 lines) - Panel init sequences
-- =sunxi-d1s-t113.dtsi= - DSI node: compatible ="allwinner,sun50i-a100-mipi-dsi"=
-- =sun8i-t113s-raft-gw-argon-va.dts= - Board reference with DSI+panel
+* Phase 1: Clock and PHY Foundation [DONE]
+- Verified T113-S CCU support for =CLK_BUS_MIPI_DSI= and =CLK_MIPI_DSI=.
+- Ported sun6i MIPI D-PHY driver to U-Boot PHY framework.
+- Implemented HS/CLK timing calculations and analog power-on sequences for A100/D1 variant.
 
-** Target (U-Boot v2026.04)
-Existing U-Boot infrastructure to build upon:
-- =drivers/video/mipi_dsi.c= - Generic MIPI DSI host framework
-- =drivers/video/dsi_host-uclass.c= - DSI host uclass
-- =include/mipi_dsi.h= - MIPI DSI structures and APIs
-- =drivers/video/sunxi/sunxi_de2.c= - DE2 driver (needs DSI output path)
-- =drivers/video/sunxi/lcdc.c= - TCON register programming
-- =drivers/video/panel-uclass.c= - Panel DM framework
+* Phase 2: Display Pipeline Drivers [DONE]
+- Ported sun6i MIPI DSI controller driver as U-Boot DSI host uclass.
+- Added DSI TRI-mode support to TCON/LCDC with automatic frame output configuration.
+- Extended DE2 driver for DSI output path and NCAT2-specific clock/reset handling.
 
-To avoid regression, please pause at after each phase so that user can test if the original features in u-boot are still working.
+* Phase 3: Panel and Device Tree [DONE]
+- Ported ILI9881C panel driver with =hd50004c30= variant support.
+- Integrated full display pipeline (Mixer0 → TCON Top → TCON LCD0 → DSI → Panel) into board DTS.
+- Enabled =CONFIG_VIDEO=, =CONFIG_VIDEO_DE2=, and splash screen support in board defconfig.
 
-* Phase 1: Clock and PHY Foundation
-The DSI controller and D-PHY require specific clocks and resets. These must work before any display output.
+* Phase 4: Integration and Refinement [IN PROGRESS]
+** 4.1 Allwinner U-Boot Comparison & Fidelity Fixes [DONE]
+- Performed deep-dive comparison with Allwinner's =u-boot-2018= (brandy-2.0).
+- Identified and fixed critical discrepancies:
+  - Corrected =CCSC01= (UI channel CSC) offset to =0xFA050= (was incorrectly =0xFA000=).
+  - Disabled TCON CCIR CSC by setting bit 19 of =TCON0_HV_IF_REG=.
+  - Corrected ILI9881C init command =0xCF= (was =0xBF=) and standardized reset sequence.
+- Ensured all Channel 1 VEP unit bases are cleared to prevent stale state.
 
-** 1.1 Verify T113-S CCU clock support for MIPI DSI
-- Check U-Boot CCU driver for =CLK_BUS_MIPI_DSI=, =CLK_MIPI_DSI= support
-- Add missing clock gates/dividers if needed
-- Source ref: Linux =sunxi-d1s-t113.dtsi= clock assignments for DSI node
+** 4.2 D-PHY IC Version Quirk [TODO]
+- Implement =0x03000024= register check (IC version bits 0-2).
+- Apply =ANA1= bit 5 quirk if =ic_ver > 0= (likely required for T113-S/D1).
 
-** 1.2 Backport sun6i MIPI D-PHY driver
-- Port =phy-sun6i-mipi-dphy.c= to U-Boot PHY framework
-- Target: =drivers/phy/allwinner/phy-sun6i-mipi-dphy.c=
-- Key: TX timing parameters (HS_TRAIL, HS_PREPARE, CLK_PRE/POST/ZERO)
-- Key: Analog config registers (ANA0-ANA4) for power/bias
-- Strip interrupt handling, use polling/delay where needed
-- Adapt from Linux =struct phy_ops= to U-Boot =struct phy_ops=
-
-* Phase 2: Display Pipeline Drivers
-The core display pipeline: DSI controller and TCON DSI-mode support.
-
-** 2.1 Backport sun6i MIPI DSI controller driver
-- Port =sun6i_mipi_dsi.c= to U-Boot
-- Target: =drivers/video/sunxi/sun6i_mipi_dsi.c=
-- Implement as U-Boot DSI host uclass driver
-- Key registers: CTL, BASIC_CTL, INST_FUNC, PIXEL_CTL, TRANS_START
-- Use U-Boot =mipi_dsi_host_ops= interface for DCS command transfer
-- Strip DRM connector/encoder, replace with U-Boot display pipeline calls
-- Variant support: =sun50i-a100-mipi-dsi= (has_mod_clk=true, set_mod_clk=true)
-
-** 2.2 Add DSI output mode to TCON/LCDC
-- Extend =drivers/video/sunxi/lcdc.c= for DSI timing mode
-- Set =SUN4I_TCON0_CPU_IF_MODE_DSI= in TCON0 control register
-- Configure TCON0 timing registers for DSI pixel clock
-- Integrate TCON Top mux to route mixer0 → TCON LCD0 → DSI
-- Reference: Linux =sun4i_tcon.c= TCON0 DSI-specific configuration
-
-** 2.3 Extend DE2 driver for DSI output path
-- Update =drivers/video/sunxi/sunxi_de2.c= to support DSI as output
-- Ensure mixer0 framebuffer setup and blender configuration work for DSI
-- Connect DE2 probe to TCON → DSI pipeline
-
-* Phase 3: Panel and Device Tree
-Panel initialization and device tree integration.
-
-** 3.1 Backport ILI9881C panel driver
-- Port =panel-ilitek-ili9881c.c= to U-Boot panel framework
-- Target: =drivers/video/panel-ilitek-ili9881c.c=
-- Include =hd50004c30= variant init sequence
-- Implement =panel_ops= (enable, get_display_timing)
-- Handle: regulator power-on, GPIO reset sequence, MIPI DCS init commands
-- Mode: =MIPI_DSI_MODE_VIDEO | MIPI_DSI_MODE_LPM=, 4 data lanes
-
-** 3.2 Add display nodes to U-Boot device tree
-- Add to =sun8i-t113s-raft-gw-argon-vb.dts=:
-  - Display Engine node (DE2)
-  - Mixer0 node
-  - TCON Top node with DSI clock output
-  - TCON LCD0 node
-  - DSI controller node (compatible: =allwinner,sun50i-a100-mipi-dsi=)
-  - D-PHY node
-  - Panel node (compatible: =ilitek,ili9881c=)
-  - Endpoint graph connections (mixer→tcon_top→tcon_lcd0→dsi→panel)
-- Reference: Linux =sun8i-t113s-raft-gw-argon-va.dts=
-
-** 3.3 Enable video in board defconfig
-- Enable: =CONFIG_VIDEO=, =CONFIG_VIDEO_DE2=, =CONFIG_DM_VIDEO=
-- Enable: =CONFIG_DISPLAY=, =CONFIG_VIDEO_MIPI_DSI=
-- Enable: =CONFIG_PHY_SUN6I_MIPI_DPHY= (new)
-- Enable: =CONFIG_VIDEO_LCD_ILI9881C= (new)
-- Enable: =CONFIG_SPLASH_SCREEN=, =CONFIG_BMP_16BPP= or =CONFIG_BMP_32BPP=
-- Set framebuffer size and address
-
-* Phase 4: Integration, Testing, and Validation
-
-** 4.1 Build integration
-- Add new drivers to Kconfig and Makefiles
-- Resolve compile errors and missing dependencies
-- Cross-compile with =source /home/jian/.scripts/setup-oe.sh=
-
-** 4.2 Boot testing
-- Flash U-Boot to board and verify:
-  - [ ] DSI controller probes successfully
-  - [ ] D-PHY initializes and calibrates
-  - [ ] Panel receives init sequence and displays
-  - [ ] Framebuffer writes appear on screen
-  - [ ] Display stable until Linux handoff
-
-** 4.3 Splash screen configuration
-- Configure splash image (BMP) loading from storage
-- Set =CONFIG_SPLASH_SOURCE= and boot environment
-- Verify splash displays during boot
+** 4.3 Testing & Validation [TODO]
+- [ ] Verify "warmish color" fix on physical hardware after warm reboot.
+- [ ] Benchmark cold boot vs. warm reboot display stability.
 
 * Phase 5: Seamless Kernel Handoff
 Minimize display disruption when Linux takes over the display pipeline from U-Boot.
 
-There are two disruption windows to address:
-- *Window 1*: U-Boot ends → kernel =simplefb= driver takes over (eliminatable)
-- *Window 2*: =simplefb= active → DRM/KMS driver reinitializes pipeline (minimizable)
-
 ** 5.1 Eliminate Window 1: simplefb framebuffer handoff [DONE]
+- U-Boot: Enabled =CONFIG_VIDEO_DT_SIMPLEFB= to patch kernel DTB with live FB info.
+- Kernel DTS: Added =framebuffer-lcd0= stub in =chosen= node with required pipeline clocks.
 
-Both changes below are required together — neither is verifiable alone.
-U-Boot needs to know to emit the simplefb node, and the kernel DTS needs
-the stub node for U-Boot to find and populate.
+** 5.2 Minimize Window 2: skip panel reset on first boot [IN PROGRESS]
+- Add =panel-skip-init= property support to Linux =panel-ilitek-ili9881c.c=.
+- Update kernel DTS to include the skip flag for the panel node.
 
-*U-Boot*: add to =configs/raft-gw-argon-vb_defconfig=:
-#+begin_src
-CONFIG_OF_BOARD_SETUP=y
-CONFIG_VIDEO_DT_SIMPLEFB=y
-#+end_src
+** 5.3 Keep display active during application startup: framebuffer console [IN PROGRESS]
+- Enable =CONFIG_FRAMEBUFFER_CONSOLE= and DRM fbdev emulation in kernel.
+- Verify boot messages transition smoothly from splash to console.
 
-=sunxi_simplefb_setup()= in =drivers/video/sunxi/sunxi_de2.c= is already wired into
-=ft_board_setup()= in =board/sunxi/board.c=. It patches the kernel DTB at boot time to
-activate the stub node with U-Boot's live framebuffer address, resolution and stride, so
-the kernel =simplefb= driver inherits the display without touching hardware.
-
-*Kernel DTS*: =sunxi_simplefb_fdt_match()= requires a pre-existing node with
-=compatible = "allwinner,simple-framebuffer"= and =allwinner,pipeline = "mixer0-lcd0"=.
-Add to the =chosen= node in
-=arch/arm/boot/dts/allwinner/sun8i-t113s-raft-gw-argon-vb.dts=:
-
-#+begin_src dts
-#include <dt-bindings/clock/sun20i-d1-ccu.h>
-
-chosen {
-    stdout-path = "serial0:115200n8";
-    #address-cells = <1>;
-    #size-cells = <1>;
-    ranges;
-
-    framebuffer-lcd0 {
-        compatible = "allwinner,simple-framebuffer", "simple-framebuffer";
-        allwinner,pipeline = "mixer0-lcd0";
-        clocks = <&ccu CLK_BUS_DE>, <&ccu CLK_DE>,
-                 <&ccu CLK_BUS_TCON_LCD0>, <&ccu CLK_TCON_LCD0>,
-                 <&ccu CLK_MIPI_DSI>;
-        status = "disabled";
-    };
-};
-#+end_src
-
-The =clocks= property instructs =simplefb= to hold the display pipeline clocks enabled
-for as long as it is the active framebuffer driver.
-
-Clock IDs (from =include/dt-bindings/clock/sun20i-d1-ccu.h=):
-| Clock             | ID  |
-|-------------------+-----|
-| CLK_DE            |  27 |
-| CLK_BUS_DE        |  28 |
-| CLK_MIPI_DSI      | 110 |
-| CLK_TCON_LCD0     | 112 |
-| CLK_BUS_TCON_LCD0 | 113 |
-
-*Verification*:
-- [X] Kernel boot log contains: =simple-framebuffer 4e000000.framebuffer: fb0: simplefb registered!=
-- [X] Splash image remains visible continuously from U-Boot through early kernel init
-- [X] No black screen gap before DRM driver loads
-
-** 5.2 Minimize Window 2: skip panel reset on first boot
-
-When the =sun4i-drm= DRM driver takes over from =simplefb=, =ili9881c_prepare()= performs
-a full panel reset (reset high → 20 ms → reset low → 20 ms) followed by the complete DCS
-init sequence. This causes an unavoidable ~200–400 ms black screen.
-
-To eliminate the reset on first boot (panel already configured by U-Boot), add
-=panel-skip-init= property support to =ili9881c_prepare()=:
-
-In =drivers/gpu/drm/panel/panel-ilitek-ili9881c.c=:
-#+begin_src c
-/* Use a static flag so skip applies only on the first prepare() after boot.
- * Subsequent prepare() calls (e.g. after suspend/resume) do a full init. */
-static bool ili9881c_first_boot = true;
-
-static int ili9881c_prepare(struct drm_panel *panel)
-{
-    struct ili9881c *ctx = panel_to_ili9881c(panel);
-
-    if (ili9881c_first_boot &&
-        of_property_read_bool(ctx->dsi->dev.of_node, "panel-skip-init")) {
-        dev_info(panel->dev, "Skipping panel init (already configured by bootloader)\n");
-        ili9881c_first_boot = false;
-        return 0;
-    }
-    ili9881c_first_boot = false;
-
-    /* ... existing reset + init sequence ... */
-}
-#+end_src
-
-Also add =panel-skip-init= to the =panel@0= node in the kernel DTS:
-#+begin_src dts
-panel@0 {
-    compatible = "huadichuangxian,hd50004c30", "ilitek,ili9881c";
-    /* ... existing properties ... */
-    panel-skip-init;
-};
-#+end_src
-
-Both changes are required together: the DT property has no effect without the driver
-support, and the driver guard does nothing without the DT property.
-
-*Verification*:
-- [X] Kernel log shows: =Skipping panel init (already configured by bootloader)=
-- [ ] No visible black screen flash during DRM/KMS takeover (D-PHY reinit still causes brief blank; deferred — user accepts <1 s)
-- [ ] Suspend/resume still performs full panel re-initialization (skip is first-boot only)
-- [ ] Hard reboot (without power cycle) still initializes panel correctly
-
-** 5.3 Keep display active during application startup: framebuffer console
-
-Even after step 5.2 eliminates the panel reset flash, the display may go blank
-between DRM initialization and the first frame drawn by the application. Enabling
-the kernel framebuffer console fills this gap — boot messages print to the LCD
-continuously, keeping the display active until userspace takes over.
-
-With =simplefb= already registered as =fb0=, this requires three Kconfig lines in
-=arch/arm/configs/raft-gw-argon-vb_defconfig=:
-
-#+begin_src
-CONFIG_DRM_FBDEV_EMULATION=y
-CONFIG_FRAMEBUFFER_CONSOLE=y
-CONFIG_FRAMEBUFFER_CONSOLE_DETECT_PRIMARY=y
-#+end_src
-
-The resulting boot sequence:
-
-#+begin_example
-U-Boot splash
-    ↓  [Window 1: eliminated by step 5.1]
-simplefb registered as fb0
-    ↓  [Window 2: eliminated by step 5.2]
-DRM takes over — fbcon switches to DRM fbdev emulation
-Kernel/userspace boot messages visible on LCD
-    ↓
-Application clears screen and displays its UI
-#+end_example
-
-Optional additions:
-- =CONFIG_LOGO=y= + =CONFIG_LOGO_LINUX_CLUT224=y= — shows Tux logo before console text
-- =CONFIG_FONT_8x16=y= — larger font for 720×1280 display
-
-*Note*: The application should clear the screen explicitly on startup rather than
-assuming a blank framebuffer.
-
-*Verification*:
-- [ ] Kernel boot messages visible on LCD during boot
-- [ ] Display never goes blank between U-Boot and application start
-- [ ] Application can clear screen and render normally on top of fbcon
-
-** 5.4 Eliminate pre-systemd blank: initramfs one-shot splash
-
-The rootfs takes ~10 seconds to mount (slow storage / fsck). During this time
-systemd has not started, so the drm-splash service cannot run. The display is blank
-from U-Boot handoff until systemd reaches basic.target (~13 s total).
-
-The fix is a *one-shot* C program run from the initramfs that sets up DRM and exits.
-Because the DRM hardware state lives in the kernel (not in userspace), the display
-hardware continues outputting the last framebuffer even after the process exits.
-The display remains live across =switch_root= with no process holding it.
-
-#+begin_example
-Kernel boots (~0 s)
-    ↓
-DRM device appears (~3 s)
-    ↓
-initramfs runs drm-set-splash (one-shot: open DRM → set mode → blit image → EXIT)
-    ↓  display hardware holds last frame with no owner
-switch_root — systemd starts (~10 s)
-    ↓
-basic.target — drm-splash daemon re-acquires DRM master, refreshes same image
-    ↓
-LVGL app sends SIGTERM → drm-splash exits → app renders
-#+end_example
-
-*Implementation requirements*:
-- =drm-set-splash= must be *statically linked* (no shared libs in initramfs)
-  - Rebuild =drm-splash= with =-DCMAKE_EXE_LINKER_FLAGS="-static"=
-  - May require =libdrm-dev= static libs (=libdrm.a=)
-- Initramfs hook: =/etc/initramfs-tools/hooks/drm-set-splash= — copies binary + SPLR file
-- Initramfs script: =/etc/initramfs-tools/scripts/init-bottom/drm-set-splash= — runs the binary
-- DRM modules must be present in initramfs (=sun4i-drm=, =sun6i-mipi-dsi=, =ili9881c=, etc.)
-
-*Note*: =init-bottom= runs just before =switch_root=, after all modules are loaded and
-the real rootfs is mounted. This is the correct hook point — the DRM device is
-reliably available at this stage.
-
-*Verification*:
-- [ ] Splash visible from ~3 s after power-on (DRM device ready)
-- [ ] Display continues showing splash across switch_root with no gap
-- [ ] drm-splash daemon on rootfs successfully re-acquires DRM master after switch_root
-
-* Dependencies Graph
-#+begin_example
-  1.1 CCU Clocks ──┐
-                    ├──→ 2.1 DSI Controller ──┐
-  1.2 D-PHY ───────┘                          │
-                                               ├──→ 3.2 Device Tree ──→ 4.1 Build ──→ 5.1 simplefb handoff [DONE]
-  2.2 TCON DSI Mode ───────────────────────────┤                                  ──→ 5.2 Panel skip-init
-                                               │                                  ──→ 5.3 fbcon on LCD
-  2.3 DE2 Extension ───────────────────────────┤
-                                               │
-  3.1 ILI9881C Panel ─────────────────────────┘
-#+end_example
-
-* Phase Status
-| Phase | Step | Description                                        | Status      |
-|-------+------+----------------------------------------------------+-------------|
-|     1 |      | Clock and PHY Foundation                           | DONE        |
-|     2 |      | Display Pipeline Drivers                           | DONE        |
-|     3 |      | Panel and Device Tree                              | DONE        |
-|     4 |      | Integration, Testing                               | DONE        |
-|     5 |  5.1 | simplefb handoff (U-Boot + kernel DTS)             | DONE        |
-|     5 |  5.2 | Panel skip-init (driver + DTS property)            | IN PROGRESS |
-|     5 |  5.3 | Framebuffer console (boot msgs on LCD)             | IN PROGRESS |
-|     5 |  5.4 | initramfs one-shot splash (pre-systemd display)    | PAUSED      |
-
-* Risk Assessment
-- *Clock tree*: T113-S CCU may not have full MIPI DSI clock support in U-Boot yet. Mitigation: direct register programming if DM clock driver lacks entries.
-- *D-PHY timing*: Analog calibration values are silicon-specific. Mitigation: use Linux-proven values from the working driver.
-- *TCON integration*: Existing =lcdc.c= may need significant changes for DSI mode. Mitigation: can add a parallel code path rather than modifying existing LVDS/RGB paths.
-- *Panel init*: DCS command sequences are timing-sensitive. Mitigation: copy exact sequences from Linux driver, use conservative delays.
+** 5.4 Eliminate pre-systemd blank: initramfs one-shot splash [PAUSED]
+- Implement statically linked =drm-set-splash= for initramfs execution.
+- Add initramfs hooks to display image before the rootfs is mounted.

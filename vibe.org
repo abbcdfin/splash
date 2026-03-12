@@ -40,6 +40,7 @@ When building u-boot and linux, I prefer out-of-tree build in subdirectories ins
 - Cross-Compilation: This is a embedded software project. Please source /home/jian/.scripts/setup-oe.sh, it will setup the bash environment for cross compiling.
 - Target Board: The target board is a embedded linux box named raft-gw-argon-vb, use can use this name to find the defconfig for both u-boot and linux.
 - Hardware Access: The target's serial console is connected to /dev/ttyUSB0 with baudrate 115200. And its ethernet is connected to dhcp server and usually can get ip address 192.168.13.100. You can access the target using root as username and " " (a single space) as password.
+- Please make build directory in ~/Download and use rmake function provided in ~/.scripts/setup-oe.sh to do out-of-tree build.
 
 * Work Flow
 Please wait for my instructions when you are ready.
