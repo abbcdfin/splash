@@ -230,8 +230,8 @@ Both changes are required together: the DT property has no effect without the dr
 support, and the driver guard does nothing without the DT property.
 
 *Verification*:
-- [ ] Kernel log shows: =Skipping panel init (already configured by bootloader)=
-- [ ] No visible black screen flash during DRM/KMS takeover
+- [X] Kernel log shows: =Skipping panel init (already configured by bootloader)=
+- [ ] No visible black screen flash during DRM/KMS takeover (D-PHY reinit still causes brief blank; deferred — user accepts <1 s)
 - [ ] Suspend/resume still performs full panel re-initialization (skip is first-boot only)
 - [ ] Hard reboot (without power cycle) still initializes panel correctly
 
@@ -242,10 +242,11 @@ between DRM initialization and the first frame drawn by the application. Enablin
 the kernel framebuffer console fills this gap — boot messages print to the LCD
 continuously, keeping the display active until userspace takes over.
 
-With =simplefb= already registered as =fb0=, this requires only two Kconfig lines in
+With =simplefb= already registered as =fb0=, this requires three Kconfig lines in
 =arch/arm/configs/raft-gw-argon-vb_defconfig=:
 
 #+begin_src
+CONFIG_DRM_FBDEV_EMULATION=y
 CONFIG_FRAMEBUFFER_CONSOLE=y
 CONFIG_FRAMEBUFFER_CONSOLE_DETECT_PRIMARY=y
 #+end_src
@@ -275,6 +276,48 @@ assuming a blank framebuffer.
 - [ ] Display never goes blank between U-Boot and application start
 - [ ] Application can clear screen and render normally on top of fbcon
 
+** 5.4 Eliminate pre-systemd blank: initramfs one-shot splash
+
+The rootfs takes ~10 seconds to mount (slow storage / fsck). During this time
+systemd has not started, so the drm-splash service cannot run. The display is blank
+from U-Boot handoff until systemd reaches basic.target (~13 s total).
+
+The fix is a *one-shot* C program run from the initramfs that sets up DRM and exits.
+Because the DRM hardware state lives in the kernel (not in userspace), the display
+hardware continues outputting the last framebuffer even after the process exits.
+The display remains live across =switch_root= with no process holding it.
+
+#+begin_example
+Kernel boots (~0 s)
+    ↓
+DRM device appears (~3 s)
+    ↓
+initramfs runs drm-set-splash (one-shot: open DRM → set mode → blit image → EXIT)
+    ↓  display hardware holds last frame with no owner
+switch_root — systemd starts (~10 s)
+    ↓
+basic.target — drm-splash daemon re-acquires DRM master, refreshes same image
+    ↓
+LVGL app sends SIGTERM → drm-splash exits → app renders
+#+end_example
+
+*Implementation requirements*:
+- =drm-set-splash= must be *statically linked* (no shared libs in initramfs)
+  - Rebuild =drm-splash= with =-DCMAKE_EXE_LINKER_FLAGS="-static"=
+  - May require =libdrm-dev= static libs (=libdrm.a=)
+- Initramfs hook: =/etc/initramfs-tools/hooks/drm-set-splash= — copies binary + SPLR file
+- Initramfs script: =/etc/initramfs-tools/scripts/init-bottom/drm-set-splash= — runs the binary
+- DRM modules must be present in initramfs (=sun4i-drm=, =sun6i-mipi-dsi=, =ili9881c=, etc.)
+
+*Note*: =init-bottom= runs just before =switch_root=, after all modules are loaded and
+the real rootfs is mounted. This is the correct hook point — the DRM device is
+reliably available at this stage.
+
+*Verification*:
+- [ ] Splash visible from ~3 s after power-on (DRM device ready)
+- [ ] Display continues showing splash across switch_root with no gap
+- [ ] drm-splash daemon on rootfs successfully re-acquires DRM master after switch_root
+
 * Dependencies Graph
 #+begin_example
   1.1 CCU Clocks ──┐
@@ -289,15 +332,16 @@ assuming a blank framebuffer.
 #+end_example
 
 * Phase Status
-| Phase | Step | Description                              | Status  |
-|-------+------+------------------------------------------+---------|
-|     1 |      | Clock and PHY Foundation                 | DONE    |
-|     2 |      | Display Pipeline Drivers                 | DONE    |
-|     3 |      | Panel and Device Tree                    | DONE    |
-|     4 |      | Integration, Testing                     | DONE    |
-|     5 |  5.1 | simplefb handoff (U-Boot + kernel DTS)   | DONE    |
-|     5 |  5.2 | Panel skip-init (driver + DTS property)  | PLANNED |
-|     5 |  5.3 | Framebuffer console (boot msgs on LCD)   | PLANNED |
+| Phase | Step | Description                                        | Status      |
+|-------+------+----------------------------------------------------+-------------|
+|     1 |      | Clock and PHY Foundation                           | DONE        |
+|     2 |      | Display Pipeline Drivers                           | DONE        |
+|     3 |      | Panel and Device Tree                              | DONE        |
+|     4 |      | Integration, Testing                               | DONE        |
+|     5 |  5.1 | simplefb handoff (U-Boot + kernel DTS)             | DONE        |
+|     5 |  5.2 | Panel skip-init (driver + DTS property)            | IN PROGRESS |
+|     5 |  5.3 | Framebuffer console (boot msgs on LCD)             | IN PROGRESS |
+|     5 |  5.4 | initramfs one-shot splash (pre-systemd display)    | PAUSED      |
 
 * Risk Assessment
 - *Clock tree*: T113-S CCU may not have full MIPI DSI clock support in U-Boot yet. Mitigation: direct register programming if DM clock driver lacks entries.

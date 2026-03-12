@@ -751,9 +751,70 @@ messages throughout — no blank screen between DRM init and app start.
 
 Optional: =CONFIG_LOGO=y= + =CONFIG_LOGO_LINUX_CLUT224=y= shows Tux logo before console text.
 
-* 11. Reference Files
+* 11. Development Environment
 
-** U-Boot Source
+** 11.1 Target Device Access
+
+| Property    | Value                    |
+|-------------+--------------------------|
+| IP          | 192.168.13.100           |
+| User        | root                     |
+| Password    | (single space)           |
+| Serial port | /dev/ttyUSB0, 115200 bps |
+
+SSH with password authentication (use =sshpass=):
+#+begin_src bash
+sshpass -p " " ssh root@192.168.13.100 "<command>"
+sshpass -p " " scp <local> root@192.168.13.100:<remote>
+#+end_src
+
+** 11.2 Serial Console Monitoring
+
+Capture boot log from /dev/ttyUSB0:
+#+begin_src bash
+# Reboot and capture (run reboot in background, then capture serial)
+sshpass -p " " ssh root@192.168.13.100 "reboot" & \
+  sleep 3 && stty -F /dev/ttyUSB0 115200 raw -echo && timeout 90 cat /dev/ttyUSB0
+#+end_src
+
+The 3-second sleep allows the reboot command to reach the target before the
+serial capture starts. Adjust timeout (90 s) as needed for full boot capture.
+
+** 11.3 Kernel Out-of-Tree Build
+
+Build directory: =~/Downloads/b-linux= (note: ~/Download is a typo — the real
+path is ~/Downloads)
+
+Workflow:
+#+begin_src bash
+# First time: configure
+cd ~/Downloads/b-linux
+source ~/.scripts/setup-oe.sh    # sets ARCH=arm, CROSS_COMPILE=...
+rmake ~/workspace/sys-in/splash/linux raft-gw-argon-vb_defconfig
+
+# Build kernel + DTB
+rmake ~/workspace/sys-in/splash/linux zImage dtbs -j$(nproc)
+
+# Artifacts
+# Kernel: ~/Downloads/b-linux/arch/arm/boot/zImage
+# DTB:    ~/Downloads/b-linux/arch/arm/boot/dts/allwinner/sun8i-t113s-raft-gw-argon-vb.dtb
+#+end_src
+
+=rmake= is a thin wrapper: ~make -C "$1" O="$(pwd)" "${@:2}"~
+
+** 11.4 Deploy to Target
+
+#+begin_src bash
+# Deploy kernel and DTB (DTB must be renamed to sunxi.dtb on target)
+sshpass -p " " scp ~/Downloads/b-linux/arch/arm/boot/zImage \
+    root@192.168.13.100:/mnt/
+sshpass -p " " scp ~/Downloads/b-linux/arch/arm/boot/dts/allwinner/sun8i-t113s-raft-gw-argon-vb.dtb \
+    root@192.168.13.100:/mnt/sunxi.dtb
+#+end_src
+
+* 12. Reference Files
+
+** U-Boot Source (in ~/workspace/sys-in/splash/u-boot)
 
 | File                                              | Role                              |
 |---------------------------------------------------+-----------------------------------|

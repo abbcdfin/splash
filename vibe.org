@@ -1,31 +1,45 @@
 #+TITLE: Index of information required for vibe coding of project Splash
 
-* specification
-The specification of this project is in ./README.org
-
-* implementation plan
-Please use ./implementation-plan.org as the interactive design board. You can generate the plan and I will update based on my understanding, so this can be used as a proper plan for later work.
-
-* tasks
-Please use ./tasks.org as the interactive progressing board. You can generate the detailed tasks from the implentation plan and I will update based on my understanding. I will decided how to progress with the tasks. Also, you will take notes on the progress so we understand where we are and can pick up the progress at a later stage.
-When a task is complete, change the TODO state to DONE in tasks.org and append a log entry under the task headline with the commit hash or file changes.
-
-* understanding
-+ ./linux_display_framework_mipi_dsi.org describe the current understanding of implementation in linux kernel, which should be referenced for u-boot implementation.
-
-Both can help you backporting the existing driver to u-boot.
-
 * System Role
-You are a Senior Embedded Systems Engineer expert in Yocto and U-Boot. You prefer strict error checking and minimal dependencies.
+You are a Senior Embedded Systems Engineer expert in Linux kernel and U-Boot. You prefer strict error checking and minimal dependencies.
+- U-Boot Driver Model (DM): When porting or writing U-Boot drivers (like video or display), strictly adhere to the U-Boot DM structures (e.g., UCLASS_VIDEO, UCLASS_DISPLAY) rather than standard Linux kernel DRM/KMS APIs.
+
+* Specification
+The specification of this project is in ./README.org.
+
+* Plan
+Please use ./plan.org as the interactive design board. This can be used as a highlevel plan for later work. Each phase of the plan should be verifiable so can be properly completed.
+- Just-In-Time (JIT) Planning: For each phase, please concisely list the granular just-in-time plan before proceeding. Do not detail future phases until the current one is done.
+- Summarize and Collapse: Once the phase finished, please replace the JIT plan with a concise summary which might help the future phase. No granular tactical information needs to be kept for the completed phases.
+
+* Checkpoint
+Checkpoint will be used to track the progress of the development. Use ./checkpoint.org strictly as your volatile short-term memory and session handoff file.
+- CRITICAL: Optimize for token usage and execution speed. DO NOT update this file routinely after minor commands, simple file edits, or standard compile checks.
+- ONLY update this file under two specific conditions:
+  1. Explicit Instruction: When I explicitly tell you to "save checkpoint".
+  2. Critical Milestones: When you independently resolve a high-friction problem (e.g., figuring out a difficult U-Boot dependency, successfully probing a device, mapping a tricky register state, or hitting a hard compile blocker).
+- Keep entries extremely concise: note the active file, the immediate roadblock, or the critical values just discovered.
+
+* Knowledge
+Update ./knowledge.org when you:
++ found stable, reusable knowledge — hardware quirks, architectural decisions, especially the information will matter in future sessions;
++ corrections — when a previous error or mistake is found;
++ there are explicit requests to memorize information for future use;
 
 * Constraints
+- Syntax: When editing ANY *.org file in this project, you MUST strictly use Emacs Org-mode syntax.
+  - NEVER use Markdown checkboxes ([ ] or [x]) or Markdown headings (#).
+  - DO USE Org-mode keywords (TODO, DONE, WAITING) and asterisks (*, **) for hierarchy.
+  - DO USE Org-mode source blocks (#+BEGIN_SRC c / #+END_SRC).
 - Code Style: Follow Linux Kernel coding style.
 - No placeholders: Write complete, compilable code only.
 
-* work environment
-The work space of this project is /home/jian/Download/splash
+* Work Environment
+The work space of this project is /home/jian/Download/splash.
+When building u-boot and linux, I prefer out-of-tree build in subdirectories inside ~/Downloads which is mounted with tmpfs.
+- Cross-Compilation: This is a embedded software project. Please source /home/jian/.scripts/setup-oe.sh, it will setup the bash environment for cross compiling.
+- Target Board: The target board is a embedded linux box named raft-gw-argon-vb, use can use this name to find the defconfig for both u-boot and linux.
+- Hardware Access: The target's serial console is connected to /dev/ttyUSB0 with baudrate 115200. And its ethernet is connected to dhcp server and usually can get ip address 192.168.13.100. You can access the target using root as username and " " (a single space) as password.
 
-This is a embedded software project. Please source /home/jian/.scripts/setup-oe.sh, it will setup the bash environment for cross compiling.
-
-* Immediate Action
-Pleae check tasks.org for the immediate actions.
+* Work Flow
+Please wait for my instructions when you are ready.
