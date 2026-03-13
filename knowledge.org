@@ -623,7 +623,15 @@ After ~sun6i_dsi_enable()~, read BASIC_CTL0 (0x05450010) after a 500ms delay:
 4. *TCON TRI_EN* must be set or TCON never sends frames to DSI
 5. *TRI start_delay* calculation requires integer MHz division (~pixelclock_Hz / 1000000~), matching Linux's ~crtc_clock / 1000~ semantics
 6. *Bus clock must precede mod clock* — enabling mod clock first with bus clock off can hang the CPU
-7. *Double-buffer commit* (~dbuff=1~) must be written after each batch of DE2 register changes
+6. *Double-buffer commit* (~dbuff=1~) must be written after each batch of DE2 register changes
+
+** 9.5 Clock Gating & Register Behavior
+
+A critical behavior to note during register inspection on Allwinner SoCs:
+
+- *Clock Gating*: If a module's clock (usually the bus clock or module-specific gate) is disabled, attempting to read its control registers will often return *0* rather than the actual hardware state.
+- *Verification*: If you can read *any* non-zero value from a module's register space, it is a definitive indicator that the clock for that module is enabled and functional.
+- *Ambiguity*: A return value of 0 is ambiguous—it could mean the register is legitimately 0, or it could mean the module is currently clock-gated. Always verify the corresponding CCU gate/reset bits if a module returns all zeros.
 
 * 10. Seamless Kernel Handoff (Phase 5)
 
@@ -882,7 +890,69 @@ In DSI Video/Burst modes, the TCON must explicitly disable CCIR color space conv
 
 To ensure a "clean" bootloader display, all VEP unit bases should be written with 0. For NCAT2 Channel 1, these start at 0xF0000 (FCE), 0xF2000 (BWS), 0xF4000 (LTI), 0xF6000 (PEAK), 0xF8000 (ASE).
 
-* 14. Implementation Reference
+** 13.5 D-PHY IC Version Quirk (NCAT2)
+
+Register ~0x03000024~ bits 0-2 contain the IC version. If this value is greater than 0, bit 5 of the D-PHY ~ANA1~ register (Offset 0x50) must be set to ensure physical layer stability and correct signal levels.
+
+** 13.6 Combo PHY Register Hygiene
+
+On NCAT2 (T113-S/D1), the display PHY is a "Combo PHY" supporting both DSI and LVDS. Stale LVDS state in ~COMBO_PHY_REG1~ (Offset 0x114) and ~COMBO_PHY_REG2~ (Offset 0x118) can cause intermittent flickering or sync issues during DSI operation. Explicitly clearing these registers to 0 before DSI configuration is recommended.
+
+** 13.7 Explicit Gamma Disable
+
+Even if ~tcon_gamma_en~ is 0, stale or uninitialized gamma tables can intermittently affect display output on some Allwinner SoCs. Explicitly clearing the TCON control register (~0x40~) and disabling the feature during early initialization is required.
+
+* 15. Baseline Register Dumps (Good State)
+
+Recorded on 2026-03-13 while display output was correct. Use these to compare against "Warmish Color" or "No Display" states.
+
+** 15.1 DE2 Mixer 0 (Base: 0x05100000)
+
+| Register | Offset | Value | Description |
+|----------+--------+------------+-------------|
+| GLB_CTL  | 0x0000 | 0x00000001 | Enable bit set |
+| GLB_SIZE | 0x000c | 0x04ff02cf | 720x1280 |
+| BLD_CTL  | 0x1000 | 0x00000100 | Pipe 0 enabled |
+| BLD_ROUT | 0x1080 | 0x00000001 | Channel 1 -> Pipe 0 |
+| BLD_MODE | 0x1090 | 0x03010301 | Standard blend |
+| UI1_ATTR | 0x3000 | 0x00000401 | UI1 enabled, XRGB8888 |
+| UI1_SIZE | 0x3004 | 0x04ff02cf | 720x1280 |
+| UI1_LADD | 0x3010 | 0x4e000000 | Framebuffer address |
+| MUX_CSC  | 0x1b000| 0x00000000 | Mixer CSC disabled |
+
+** 15.2 TCON LCD0 (Base: 0x05461000)
+
+| Register | Offset | Value | Description |
+|----------+--------+------------+-------------|
+| GCTL     | 0x0000 | 0x80000000 | TCON enable |
+| TCON0_CTL| 0x0040 | 0x81070031 | Enable, DSI mode, delay |
+| HV_IF    | 0x0058 | 0x00080000 | CCIR CSC disabled (bit 19) |
+| CPU_IF   | 0x0060 | 0x10000005 | DSI mode, TRI_FIFO_EN, TRI_EN |
+| TRI0     | 0x0160 | 0x01f302cf | Trigger timing 0 |
+| TRI1     | 0x0164 | 0x00d004ff | Trigger timing 1 |
+| TRI2     | 0x0168 | 0x1ada000a | Trigger timing 2 |
+
+** 15.3 DSI Host (Base: 0x05450000)
+
+| Register | Offset | Value | Description |
+|----------+--------+------------+-------------|
+| CTL      | 0x0000 | 0x01010001 | DSI enabled |
+| BASIC_CTL0| 0x0010 | 0x00030001 | ECC/CRC EN, INST_ST running |
+| BASIC_CTL1| 0x0014 | 0x00005157 | Video mode, start delay |
+| JUMP_SEL | 0x0048 | 0x63f07006 | HSD loop |
+
+** 15.4 D-PHY (Base: 0x05451000)
+
+| Register | Offset | Value | Description |
+|----------+--------+------------+-------------|
+| GCTL     | 0x0000 | 0x00000031 | 4 lanes, enabled |
+| ANA0     | 0x004c | 0x00000044 | Analog setting 0 |
+| ANA1     | 0x0050 | 0x80000020 | Bit 5 quirk set (IC ver > 0) |
+| ANA2     | 0x0054 | 0x0f000012 | Analog setting 2 |
+| ANA3     | 0x0058 | ff040000   | Analog setting 3 |
+| PLL_REG0 | 0x0104 | 0x00f78582 | D-PHY PLL enabled |
+
+* 16. Implementation Reference
 
 ** 14.1 Source (Linux v6.10 Backport Origin)
 

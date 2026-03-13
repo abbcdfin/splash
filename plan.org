@@ -23,7 +23,7 @@ Pipeline: DE2 Mixer → TCON Top → TCON LCD0 → DSI Controller → D-PHY → 
 - Integrated full display pipeline (Mixer0 → TCON Top → TCON LCD0 → DSI → Panel) into board DTS.
 - Enabled =CONFIG_VIDEO=, =CONFIG_VIDEO_DE2=, and splash screen support in board defconfig.
 
-* Phase 4: Integration and Refinement [IN PROGRESS]
+* Phase 4: Integration and Refinement [UNDER OBSERVATION]
 ** 4.1 Allwinner U-Boot Comparison & Fidelity Fixes [DONE]
 - Performed deep-dive comparison with Allwinner's =u-boot-2018= (brandy-2.0).
 - Identified and fixed critical discrepancies:
@@ -31,14 +31,18 @@ Pipeline: DE2 Mixer → TCON Top → TCON LCD0 → DSI Controller → D-PHY → 
   - Disabled TCON CCIR CSC by setting bit 19 of =TCON0_HV_IF_REG=.
   - Corrected ILI9881C init command =0xCF= (was =0xBF=) and standardized reset sequence.
 - Ensured all Channel 1 VEP unit bases are cleared to prevent stale state.
+- Explicitly disabled TCON gamma table in =lcdc_init= as a defensive measure.
+- Fully disabled =DCSC= (Display Color Space Conversion) and =SMBL= (Smart Backlight) by clearing their base registers (=0xB0000= and =0x60000=). On NCAT2, DCSC use bit 1 for enable if SMBL is present.
 
-** 4.2 D-PHY IC Version Quirk [TODO]
-- Implement =0x03000024= register check (IC version bits 0-2).
-- Apply =ANA1= bit 5 quirk if =ic_ver > 0= (likely required for T113-S/D1).
+** 4.2 D-PHY & Combo PHY Refinements [DONE]
+- Implemented =0x03000024= register check (IC version bits 0-2).
+- Applied =ANA1= bit 5 quirk if =ic_ver > 0= (required for T113-S/D1 stability).
+- Added explicit clearing of =COMBO_PHY_REG1= (0x114) and =COMBO_PHY_REG2= (0x118) to prevent interference from stale LVDS/Combo state.
 
-** 4.3 Testing & Validation [TODO]
-- [ ] Verify "warmish color" fix on physical hardware after warm reboot.
-- [ ] Benchmark cold boot vs. warm reboot display stability.
+** 4.3 Testing & Validation [IN PROGRESS]
+- [X] Verified fixes on physical hardware; intermittent "warmish color" currently not reproducible.
+- [ ] Monitor display stability over extended periods and multiple reboot cycles.
+- [ ] If issue returns, compare live register state against "Good State" baseline in =knowledge.org=.
 
 * Phase 5: Seamless Kernel Handoff
 Minimize display disruption when Linux takes over the display pipeline from U-Boot.

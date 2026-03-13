@@ -6,8 +6,12 @@
 - TCON CCIR CSC: Bit 19 of TCON0_HV_IF_REG (0x58) must be set to 1 to disable unwanted color conversion.
 - Panel Command: ILI9881C init command 0xCF confirmed as correct (replaces 0xBF).
 - IC Version: Register 0x03000024 bits 0-2 contain IC version; affects D-PHY ANA1 bit 5.
+- DCSC/SMBL: Fully disabled DCSC (base 0xB0000) and SMBL (base 0x60000) to ensure clean display state.
+- Combo PHY: Explicitly zeroed COMBO_PHY_REG1 (0x114) and COMBO_PHY_REG2 (0x118) to prevent stale state interference.
 
 * Status
-- Fidelity fixes for "warmish color" implemented in sunxi_de2.c and lcdc.c.
+- Fidelity fixes for "warmish color" and flickering implemented in sunxi_de2.c, lcdc.c, and phy-sun6i-mipi-dphy.c.
 - Panel driver updated with correct 0xCF command and standard reset sequence.
-- All drivers cross-compiled successfully.
+- All drivers cross-compiled and flashed successfully.
+- Baseline register values recorded in knowledge.org for future comparison.
+- System under observation for intermittent issues.
