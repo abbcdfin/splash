@@ -39,26 +39,70 @@ Pipeline: DE2 Mixer → TCON Top → TCON LCD0 → DSI Controller → D-PHY → 
 - Applied =ANA1= bit 5 quirk if =ic_ver > 0= (required for T113-S/D1 stability).
 - Added explicit clearing of =COMBO_PHY_REG1= (0x114) and =COMBO_PHY_REG2= (0x118) to prevent interference from stale LVDS/Combo state.
 
-** 4.3 Testing & Validation [IN PROGRESS]
+** 4.3 Testing & Validation [PAUSED]
 - [X] Verified fixes on physical hardware; intermittent "warmish color" currently not reproducible.
-- [ ] Monitor display stability over extended periods and multiple reboot cycles.
-- [ ] If issue returns, compare live register state against "Good State" baseline in =knowledge.org=.
+- [X] Live register dump performed on target (2026-03-14) via =dump_display_settings.sh=.
+- Two findings recorded in =knowledge.org= for future investigation:
+  1. Linux =phy-sun6i-mipi-dphy.c= does not implement the IC version / ANA1 bit-5 quirk.
+  2. Linux leaves =COMBO_PHY_REG2= (0x118) at 0x14 instead of clearing it.
+- Paused in favour of Phase 5 (initramfs drm-splash). Resume if color shift reappears.
 
-* Phase 5: Seamless Kernel Handoff
-Minimize display disruption when Linux takes over the display pipeline from U-Boot.
+* Phase 5: Early Splash via initramfs DRM
+Strategy change: U-Boot does not initialize the display. Panel stays cold through kernel
+boot. The DRM stack (sun4i-drm + sun6i-dsi) does a clean, uncontested panel init during
+kernel =device_initcall=. A statically linked =drm-splash= binary runs from initramfs
+immediately after =/dev/dri/card0= is available, showing the splash image before rootfs
+is mounted. Expected time to first image: ~3 seconds.
 
-** 5.1 Eliminate Window 1: simplefb framebuffer handoff [DONE]
-- U-Boot: Enabled =CONFIG_VIDEO_DT_SIMPLEFB= to patch kernel DTB with live FB info.
-- Kernel DTS: Added =framebuffer-lcd0= stub in =chosen= node with required pipeline clocks.
+** 5.1 simplefb framebuffer handoff [CANCELLED]
+Cancelled: U-Boot no longer initializes the display, so there is no live framebuffer to
+hand off. =CONFIG_VIDEO=, =CONFIG_VIDEO_DT_SIMPLEFB=, and the DTS =framebuffer-lcd0= stub
+are all removed/disabled.
 
-** 5.2 Minimize Window 2: skip panel reset on first boot [IN PROGRESS]
-- Add =panel-skip-init= property support to Linux =panel-ilitek-ili9881c.c=.
-- Update kernel DTS to include the skip flag for the panel node.
+** 5.2 Skip panel reset on first boot [CANCELLED]
+Cancelled: panel-skip-init is only needed when U-Boot leaves the panel in an initialized
+state. With a cold panel, the DRM driver performs a clean first-time init with no conflict.
 
-** 5.3 Keep display active during application startup: framebuffer console [IN PROGRESS]
-- Enable =CONFIG_FRAMEBUFFER_CONSOLE= and DRM fbdev emulation in kernel.
-- Verify boot messages transition smoothly from splash to console.
+** 5.3 Framebuffer console [PAUSED]
+Paused: not needed for the current goal. May be revisited if kernel text console output
+on the LCD is desired.
 
-** 5.4 Eliminate pre-systemd blank: initramfs one-shot splash [PAUSED]
-- Implement statically linked =drm-set-splash= for initramfs execution.
-- Add initramfs hooks to display image before the rootfs is mounted.
+** 5.4 initramfs drm-splash [DONE]
+Show splash image from initramfs via DRM, before rootfs is mounted.
+- [X] Implement statically linked =drm-splash= binary (855 KB, ARM static).
+      Opens =/dev/dri/card0=, allocates dumb buffer (XRGB8888), calls
+      =drmModeSetCrtc=, drops DRM master (=drmDropMaster=), waits for SIGTERM.
+      Supports BMP and SPLR image formats.
+- [X] Build overlay for existing OpenWrt initramfs (=openwrt.cpio.gz=) using
+      concatenated cpio technique: =(zcat openwrt.cpio.gz; cat overlay.cpio) | gzip=.
+      Kernel's =init/initramfs.c= processes concatenated streams; later entries
+      override earlier ones. Overlay adds: =/init= (modified), =/bin/drm-splash=,
+      =/splash.bmp=.
+- [X] Modified =/init= adds =mount -t devtmpfs devtmpfs /dev= before the
+      drm-splash wait loop (=auot_dev= in OpenWrt does not mount devtmpfs).
+      Polls for =/dev/dri/card0= up to 5 s, then launches drm-splash in background.
+      All existing OpenWrt preinit and FAT-hook logic is preserved unchanged.
+- [X] Verified drm-splash launches at ~3.75 s, DSI initialises at ~3.87 s,
+      process reaches "displaying /splash.bmp, waiting for SIGTERM" state.
+
+*** Key learnings
+- =gen_initramfs.sh= in this kernel treats all regular files as text filelists;
+  multi-source =CONFIG_INITRAMFS_SOURCE= does not work. Pre-merge into a single
+  =.cpio.gz= is the correct approach.
+- Embedding the combined initramfs (4.9 MB) in the kernel produces a ~13 MB zImage
+  that failed to boot. Recovery: revert =CONFIG_INITRAMFS_SOURCE= to original
+  =openwrt.cpio.gz= only and rebuild kernel. Device recovered (2026-03-14).
+- =sleep 0.1= not available in OpenWrt busybox; use integer seconds only.
+
+*** Current status
+The kernel embeds only the original =openwrt.cpio.gz=. The drm-splash overlay
+is built but not yet active in the deployed kernel.
+
+*** Recommended next approach
+Use the OpenWrt FAT hook mechanism to inject drm-splash without any kernel rebuild:
+- Place =init.sh= + =md5.txt= on the FAT partition (mmcblk0p4).
+- The existing =/init= in openwrt.cpio.gz mounts mmcblk0p4, checks the MD5, and
+  =exec='s =/init.sh= if valid.
+- =init.sh= mounts devtmpfs, waits for =/dev/dri/card0=, launches drm-splash in
+  background, then =exec='s =/sbin/init= to continue normal boot.
+- This requires no kernel rebuild and no changes to the deployed initramfs.

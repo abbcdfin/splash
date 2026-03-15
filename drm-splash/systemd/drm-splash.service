@@ -1,0 +1,22 @@
+[Unit]
+Description=DRM Splash Screen
+Before=graphical.target
+
+[Service]
+Type=simple
+# Poll until /dev/dri/card0 appears (typically within 3-5s of boot)
+ExecStartPre=/bin/sh -c 'until [ -e /dev/dri/card0 ]; do sleep 0.1; done'
+ExecStart=/usr/bin/drm-splash /usr/share/drm-splash/splash.splr
+ExecStop=/bin/kill -TERM $MAINPID
+
+KillSignal=SIGTERM
+TimeoutStopSec=2
+TimeoutStartSec=30
+
+Restart=no
+
+# Allow access to /dev/dri/card0
+SupplementaryGroups=video render
+
+[Install]
+WantedBy=basic.target

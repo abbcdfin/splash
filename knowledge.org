@@ -625,7 +625,20 @@ After ~sun6i_dsi_enable()~, read BASIC_CTL0 (0x05450010) after a 500ms delay:
 6. *Bus clock must precede mod clock* — enabling mod clock first with bus clock off can hang the CPU
 6. *Double-buffer commit* (~dbuff=1~) must be written after each batch of DE2 register changes
 
-** 9.5 Clock Gating & Register Behavior
+** 9.5 DSI Bus Clock Gating Under Linux
+
+Linux power-manages =BUS_MIPI_DSI_GATING= (CCU 0xb4c) BIT(0) off after the HSD video
+stream starts. The AHB bus clock is gated but the D-PHY functional clock (=MIPI_DSI_CLK=
+0xb24) remains enabled, so the physical lane stream continues uninterrupted.
+
+*Symptom:* All DSI (0x05450000) and D-PHY (0x05451000) register reads return 0 on a
+running Linux system, even though the display is active.
+
+*Workaround for =dump_display_settings.sh=:* Temporarily set BIT(0) of 0x02001b4c before
+reading DSI/DPHY registers, then restore the original value. The script does this
+automatically around the D-PHY and DSI sections.
+
+** 9.6 Clock Gating & Register Behavior
 
 A critical behavior to note during register inspection on Allwinner SoCs:
 
@@ -894,9 +907,21 @@ To ensure a "clean" bootloader display, all VEP unit bases should be written wit
 
 Register ~0x03000024~ bits 0-2 contain the IC version. If this value is greater than 0, bit 5 of the D-PHY ~ANA1~ register (Offset 0x50) must be set to ensure physical layer stability and correct signal levels.
 
+*Linux driver gap (confirmed 2026-03-14):* On the test board ic_ver=3. Live register read of
+=DPHY_ANA1= (0x05451050) with bus clock enabled showed =0x80000000= — bit 5 is *not set*.
+The mainline =phy-sun6i-mipi-dphy.c= does not implement this IC version check. The display
+operates because the effect is on signal margin rather than hard functionality, but this is
+a latent risk for intermittent stability issues. The fix needs to be applied to the Linux
+PHY driver (mirror what U-Boot's =phy-sun6i-mipi-dphy.c= does for the A100/D1 variant).
+
 ** 13.6 Combo PHY Register Hygiene
 
 On NCAT2 (T113-S/D1), the display PHY is a "Combo PHY" supporting both DSI and LVDS. Stale LVDS state in ~COMBO_PHY_REG1~ (Offset 0x114) and ~COMBO_PHY_REG2~ (Offset 0x118) can cause intermittent flickering or sync issues during DSI operation. Explicitly clearing these registers to 0 before DSI configuration is recommended.
+
+*Linux driver gap (confirmed 2026-03-14):* Live register read showed =COMBO_PHY_REG1= = 0x0
+(clean) but =COMBO_PHY_REG2= (0x05451118) = =0x14= (not zeroed). The Linux DSI/PHY driver
+does not clear these registers. If intermittent flickering is observed under Linux, zeroing
+=COMBO_PHY_REG2= in the PHY power-on sequence is the first fix to try.
 
 ** 13.7 Explicit Gamma Disable
 
@@ -973,3 +998,103 @@ Existing U-Boot infrastructure utilized or extended:
 - =drivers/video/sunxi/sunxi_de2.c= — DE2 driver (extended for DSI path).
 - =drivers/video/sunxi/lcdc.c= — TCON register programming and TRI timing.
 - =drivers/video/panel-uclass.c= — Panel driver model framework.
+
+* 17. Early Splash via initramfs DRM (drm-splash)
+
+** 17.1 Architecture
+
+The early splash strategy runs a statically linked =drm-splash= binary from the
+initramfs before the root filesystem is mounted. This avoids U-Boot display
+initialization entirely and lets the Linux DRM stack (=sun4i-drm= + =sun6i-dsi=)
+do a clean, uncontested panel init during =device_initcall=.
+
+- U-Boot: =CONFIG_VIDEO= disabled → panel stays cold through kernel boot.
+- Kernel DRM stack initialises panel at ~3.5 s (=device_initcall=).
+- =drm-splash= launches at ~3.75 s, DSI returns connector at ~3.87 s.
+- =drm-splash= calls =drmModeSetCrtc=, then =drmDropMaster= immediately.
+- Waits for SIGTERM (sent by userspace when real compositor starts).
+
+** 17.2 drm-splash Binary
+
+File: =drm-splash/initramfs/build/bin/drm-splash= (855 KB, static ARM).
+
+Behavior:
+1. Open =/dev/dri/card0=.
+2. Find first connected connector and its preferred mode.
+3. Allocate dumb buffer (32 bpp, XRGB8888), mmap, blit BMP/SPLR image.
+4. Call =drmModeSetCrtc=.
+5. Call =drmDropMaster()= immediately so later processes can take DRM master.
+6. Block on =SIGTERM=.
+
+** 17.3 OpenWrt Initramfs Overlay
+
+The existing system uses =openwrt.cpio.gz= as the kernel-embedded initramfs.
+Rather than replacing it, the overlay is concatenated as a second cpio stream:
+
+#+begin_src bash
+(zcat openwrt.cpio.gz; cat overlay.cpio) | gzip -9 > combined.cpio.gz
+#+end_src
+
+The kernel's =init/initramfs.c= processes concatenated cpio streams in order;
+later entries override earlier ones. The overlay contributes three files:
+- =/init= — modified (adds devtmpfs mount + drm-splash launch)
+- =/bin/drm-splash= — the static binary
+- =/splash.bmp= — the splash image
+
+** 17.4 Critical: devtmpfs Must Be Mounted Explicitly
+
+=auot_dev= in the OpenWrt initramfs mounts =proc=, =sysfs=, and =tmpfs= but NOT
+=devtmpfs= at =/dev=. Without it, =/dev/dri/card0= never appears.
+
+The overlay =/init= must add before the drm-splash wait loop:
+
+#+begin_src sh
+mount -t devtmpfs devtmpfs /dev
+#+end_src
+
+** 17.5 gen_initramfs.sh Limitation
+
+This kernel version's =usr/gen_initramfs.sh= treats ALL regular files in
+=CONFIG_INITRAMFS_SOURCE= as text filelists. The only fast-paths are a single
+=.cpio= or =.cpio.gz= source (handled directly by =usr/Makefile=).
+
+Space-separated multi-source values in =CONFIG_INITRAMFS_SOURCE= do not work.
+Pre-merging into a single =.cpio.gz= (as above) is the correct approach.
+
+** 17.6 zImage Size Warning
+
+Embedding the combined initramfs (~4.9 MB) in the kernel via
+=CONFIG_INITRAMFS_SOURCE= produces a ~13 MB =zImage= that fails to boot
+(U-Boot shows "Starting kernel..." but kernel produces no output).
+
+*Root cause*: The kernel decompresses and re-packs the cpio during build,
+inflating the =zImage= to the point where it exceeds boot constraints.
+
+*Recovery*: Revert =CONFIG_INITRAMFS_SOURCE= to original =openwrt.cpio.gz=
+only and rebuild the kernel.
+
+** 17.7 Recommended Deployment: FAT Hook (No Kernel Rebuild)
+
+The OpenWrt =/init= script on the deployed kernel already implements a FAT hook:
+it mounts =mmcblk0p4= (FAT), checks =/media/boot/init.sh= + =md5.txt=, and
+=exec='s the script if the MD5 matches.
+
+This mechanism allows injecting drm-splash without any kernel rebuild:
+
+1. Write an =init.sh= to the FAT partition that:
+   - Mounts devtmpfs
+   - Waits for =/dev/dri/card0=
+   - Launches =drm-splash= in background
+   - =exec='s =/sbin/init= to continue normal boot
+2. Copy =drm-splash= binary and =splash.bmp= to the FAT partition.
+3. Write the =md5.txt= of =init.sh=.
+
+No kernel rebuild required; changes are confined to the FAT partition.
+
+** 17.8 Busybox Sleep Limitation
+
+OpenWrt busybox =sleep= only accepts integer seconds. =sleep 0.1= causes:
+
+  =sh: sleep: invalid number '0.1'=
+
+Use =sleep 1= with a counter loop instead.

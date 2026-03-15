@@ -1,0 +1,65 @@
+#!/bin/sh
+
+export PATH="/usr/sbin:/usr/bin:/sbin:/bin"
+
+#mount -t proc proc /proc
+#mount -t sysfs sysfs /sys
+
+#mount -t cgroup cgroup /sys/fs/cgroup
+#mount -t tmpfs tmpfs /dev
+#mount -t tmpfs tmpfs /var
+#mkdir 755 /dev/pts
+#mount -t devpts devpts /dev/pts
+#mknod -m 666 /dev/null c 1 3
+
+#mount -t tmpfs tmpfs /tmp
+
+#mkdir 755 /tmp/run
+#mkdir 755 /tmp/lock
+#mkdir 755 /tmp/state
+#mkdir 755 /var/run
+/bin/auot_dev
+/sbin/kmodloader /etc/modules-boot.d/
+
+# Start splash screen in background before preinit
+mount -t devtmpfs devtmpfs /dev
+echo "drm-splash: waiting for /dev/dri/card0" > /dev/kmsg
+i=0
+while [ $i -lt 5 ]; do
+    [ -c /dev/dri/card0 ] && break
+    echo "drm-splash: /dev/dri/card0 not ready, attempt $i" > /dev/kmsg
+    sleep 1
+    i=$((i + 1))
+done
+if [ -c /dev/dri/card0 ]; then
+    echo "drm-splash: launching /bin/drm-splash" > /dev/kmsg
+    /bin/drm-splash /splash.bmp &
+    echo "drm-splash: launched with PID $!" > /dev/kmsg
+else
+    echo "drm-splash: /dev/dri/card0 not found after wait, skipping" > /dev/kmsg
+fi
+
+export PREINIT=1
+touch /tmp/.preinit
+/sbin/procd -h /etc/hotplug-preinit.json &
+/bin/sh /etc/preinit
+killall procd
+unset INITRAMFS
+unset PREINIT
+rm /tmp/.preinit
+
+mount -t vfat -o ro /dev/mmcblk0p4 /media/boot
+if [ $? -eq 0 -a -x /media/boot/init.sh -a -f /media/boot/md5.txt ]; then
+    cp -af /media/boot/init.sh /
+    md5="`md5sum /init.sh | cut -d ' ' -f1`"
+    if [ "`cat /media/boot/md5.txt`" = ${md5} ]; then
+        umount /media/boot
+        exec /init.sh
+    else
+        echo "md5 error: " ${md5} > /rom/error
+    fi
+else
+    echo "init.sh not exist!" > /rom/error
+fi
+
+exec /sbin/init $*

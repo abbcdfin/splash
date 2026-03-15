@@ -1,0 +1,60 @@
+#!/bin/sh
+#
+# initramfs /init
+#
+# Mounts essential filesystems, starts drm-splash in the background,
+# then pivots to the real rootfs specified by root= on the kernel cmdline.
+#
+
+mount -t proc     proc     /proc
+mount -t sysfs    sysfs    /sys
+mount -t devtmpfs devtmpfs /dev
+
+# Wait up to 5 s for the DRM device to appear (drivers probe asynchronously)
+i=0
+while [ $i -lt 50 ]; do
+    [ -c /dev/dri/card0 ] && break
+    sleep 0.1
+    i=$((i + 1))
+done
+
+if [ -c /dev/dri/card0 ]; then
+    /bin/drm-splash /splash.bmp &
+else
+    echo "initramfs: /dev/dri/card0 not found, skipping splash"
+fi
+
+# Parse root= and rootfstype= from kernel command line
+ROOTDEV=
+ROOTFSTYPE=
+for arg in $(cat /proc/cmdline); do
+    case "$arg" in
+        root=*)        ROOTDEV="${arg#root=}" ;;
+        rootfstype=*)  ROOTFSTYPE="${arg#rootfstype=}" ;;
+    esac
+done
+
+if [ -z "$ROOTDEV" ]; then
+    echo "initramfs: WARNING: no root= on cmdline"
+fi
+
+# Wait up to 10 s for the root block device to appear
+i=0
+while [ $i -lt 100 ]; do
+    [ -b "$ROOTDEV" ] && break
+    sleep 0.1
+    i=$((i + 1))
+done
+
+if [ ! -b "$ROOTDEV" ]; then
+    echo "initramfs: ERROR: root device $ROOTDEV not found, dropping to shell"
+    exec sh
+fi
+
+if [ -n "$ROOTFSTYPE" ]; then
+    mount -t "$ROOTFSTYPE" -o ro "$ROOTDEV" /newroot
+else
+    mount -o ro "$ROOTDEV" /newroot
+fi
+
+exec switch_root /newroot /sbin/init
