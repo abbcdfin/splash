@@ -1098,3 +1098,64 @@ OpenWrt busybox =sleep= only accepts integer seconds. =sleep 0.1= causes:
   =sh: sleep: invalid number '0.1'=
 
 Use =sleep 1= with a counter loop instead.
+
+* 18. EK79007 Panel Driver (U-Boot Backport)
+
+** 18.1 Driver Files
+- =u-boot/drivers/video/panel-elitek-ek79007.c= — new driver backported from Linux.
+- =u-boot/drivers/video/Kconfig= — added =CONFIG_VIDEO_LCD_EK79007= entry.
+- =u-boot/drivers/video/Makefile= — added =obj-$(CONFIG_VIDEO_LCD_EK79007)= rule.
+- =u-boot/configs/raft-gw-argon-vb_defconfig= — =CONFIG_VIDEO_LCD_EK79007=y= added.
+- DTS already had the =panel@0= node under =&dsi= with =compatible = "elitek,ek79007"=.
+
+** 18.2 Panel Specification
+| Parameter    | Value                                                       |
+|--------------+-------------------------------------------------------------|
+| Resolution   | 1024 × 600                                                  |
+| Pixel clock  | 51.2 MHz                                                    |
+| HFP/HBP/HSA  | 160 / 160 / 10                                              |
+| VFP/VBP/VSA  | 12 / 23 / 1                                                 |
+| DSI lanes    | 4                                                           |
+| DSI format   | RGB888                                                      |
+| Mode flags   | VIDEO | VIDEO_SYNC_PULSE | CLOCK_NON_CONTINUOUS | LPM        |
+| Physical     | 154 mm × 86 mm                                              |
+
+** 18.3 Clock Chain (Correct — Verified from Boot Log)
+#+begin_example
+pixel_clk = 51.2 MHz
+dsi_bit_clk = 51.2 × 24 / 4 = 307.2 MHz
+PLL_4X target = 307.2 × 4 = 1228.8 MHz
+PLL_4X actual = 24 × 51 / 1 = 1224 MHz  (n=51, m=1; 0.4% off — PLL M-bit limit)
+TCON_DIV = 4 → TCON clock = 306 MHz = DSI bit rate
+#+end_example
+
+Clock is derived automatically from =pixelclock= in =display_timing=. No manual tuning needed.
+The 0.4% error is within tolerance and is the same resolution limit as all other panels.
+
+** 18.4 Reset GPIO Convention (Same as ILI9881C)
+- DTS: =reset-gpios = <&pio 4 1 GPIO_ACTIVE_LOW>= (PE1, active-low signal).
+- =dm_gpio_set_value(reset, 0)= → physical HIGH → panel running.
+- =dm_gpio_set_value(reset, 1)= → physical LOW  → panel in reset.
+- Sequence used: assert (1) → 15 ms → release (0) → 120 ms → send commands.
+- This matches ILI9881C driver convention on this hardware.
+
+** 18.5 DSI LP Command Log (Verified Correct)
+Commands are transmitted in LP mode as DCS SHORT WRITE (type=0x15 for 2-byte, 0x05 for 1-byte).
+All 9 commands verified in boot log:
+#+begin_example
+0x80=0xAC  0x81=0xB8  0x82=0x09  0x83=0x78
+0x84=0x7F  0x85=0xBB  0x86=0x70
+0x11 (exit_sleep, +120ms)
+0x29 (set_display_on)
+#+end_example
+
+*DSI command logging*: All =printf()= debug calls across the display pipeline have been
+converted to =log_debug()= (=<log.h>=). Silent by default; enabled by =#define DEBUG= or
+by setting =CONFIG_LOG_DEFAULT_LEVEL= in the board configuration.
+
+** 18.6 Display Verified Working [2026-03-18]
+EK79007 panel confirmed working on hardware with U-Boot splash screen.
+Full pipeline (DE2 1024×600 → TCON LCD0 → DSI → EK79007) initialises and displays correctly.
+
+*Next step*: Enable Linux =sun6i-dsi= / =sun4i-drm= debug log, compare register dump
+vs U-Boot to find the divergence.

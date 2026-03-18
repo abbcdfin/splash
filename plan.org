@@ -106,3 +106,23 @@ Use the OpenWrt FAT hook mechanism to inject drm-splash without any kernel rebui
 - =init.sh= mounts devtmpfs, waits for =/dev/dri/card0=, launches drm-splash in
   background, then =exec='s =/sbin/init= to continue normal boot.
 - This requires no kernel rebuild and no changes to the deployed initramfs.
+
+* Phase 6: EK79007 Panel Support in U-Boot [DONE]
+Add support for the Elitek EK79007 1024×600 4-lane MIPI DSI panel alongside the existing
+ILI9881C driver, so the same U-Boot binary can drive either panel via DTS switch.
+
+** 6.1 Driver Backport [DONE]
+- Backported =panel-elitek-ek79007.c= from Linux =drivers/gpu/drm/panel/panel-ek79007.c=.
+- Added =CONFIG_VIDEO_LCD_EK79007=y= to =raft-gw-argon-vb_defconfig=.
+- DTS already had =compatible = "elitek,ek79007"= node under =&dsi= guarded by =#if 1=.
+- Reset sequence: assert (value=1) → release (value=0) + 120 ms wait, matching ILI9881C
+  convention on this hardware (GPIO_ACTIVE_LOW, physical HIGH = panel running).
+- Clock chain correct: 51.2 MHz pixel → 307.2 MHz DSI bit rate → 1224 MHz PLL (0.4% off,
+  limited by T113-S PLL M-bit constraint; same derivation mechanism as ILI9881C).
+
+** 6.2 Display Bring-up [DONE]
+- EK79007 panel verified working on hardware with U-Boot splash screen.
+- All debug =printf= calls across the display pipeline (=sunxi_lcd.c=, =lcdc.c=,
+  =sun6i_mipi_dsi.c=, =sunxi_de2.c=, =phy-sun6i-mipi-dphy.c=, =panel-ilitek-ili9881c.c=,
+  =panel-elitek-ek79007.c=) converted to =log_debug()= — silent by default, enabled via
+  =DEBUG= macro or board-level log configuration.
