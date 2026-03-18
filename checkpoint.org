@@ -1,17 +1,15 @@
 #+TITLE: Project Splash - Session Checkpoint
-#+DATE: [2026-03-12 Thu]
-
-* Critical Discoveries (T113-S / NCAT2)
-- CCSC01 Offset: Found correct offset is 0xFA050 (relative to DE2 mixer base). 0xFA000 is FCC1 base.
-- TCON CCIR CSC: Bit 19 of TCON0_HV_IF_REG (0x58) must be set to 1 to disable unwanted color conversion.
-- Panel Command: ILI9881C init command 0xCF confirmed as correct (replaces 0xBF).
-- IC Version: Register 0x03000024 bits 0-2 contain IC version; affects D-PHY ANA1 bit 5.
-- DCSC/SMBL: Fully disabled DCSC (base 0xB0000) and SMBL (base 0x60000) to ensure clean display state.
-- Combo PHY: Explicitly zeroed COMBO_PHY_REG1 (0x114) and COMBO_PHY_REG2 (0x118) to prevent stale state interference.
+#+DATE: [2026-03-18 Wed]
 
 * Status
-- Fidelity fixes for "warmish color" and flickering implemented in sunxi_de2.c, lcdc.c, and phy-sun6i-mipi-dphy.c.
-- Panel driver updated with correct 0xCF command and standard reset sequence.
-- All drivers cross-compiled and flashed successfully.
-- Baseline register values recorded in knowledge.org for future comparison.
-- System under observation for intermittent issues.
+- U-Boot display (ILI9881C 720×1280) working correctly — shows correct splash image, detailed in lcd_good.jpg.
+- Linux display (same panel) shows vertical colour-banded stripes, detailed in lcd_bad.jpg.
+
+* Active Problem: Linux Vertical Stripes (Phase 7.1)
+- Symptom: U-Boot shows correct uniform image; Linux shows vertical colour bands on same panel.
+- Panel: ILI9881C (hd50004c30), 720×1280, 4-lane DSI, RGB888, video sync-pulse mode.
+- Linux board DTS: =linux/arch/arm/boot/dts/allwinner/sun8i-t113s-raft-gw-argon-vb.dts=
+
+** Confirmed NOT the cause
+
+** Outstanding Suspect

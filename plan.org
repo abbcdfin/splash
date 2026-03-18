@@ -23,29 +23,13 @@ Pipeline: DE2 Mixer → TCON Top → TCON LCD0 → DSI Controller → D-PHY → 
 - Integrated full display pipeline (Mixer0 → TCON Top → TCON LCD0 → DSI → Panel) into board DTS.
 - Enabled =CONFIG_VIDEO=, =CONFIG_VIDEO_DE2=, and splash screen support in board defconfig.
 
-* Phase 4: Integration and Refinement [UNDER OBSERVATION]
-** 4.1 Allwinner U-Boot Comparison & Fidelity Fixes [DONE]
-- Performed deep-dive comparison with Allwinner's =u-boot-2018= (brandy-2.0).
-- Identified and fixed critical discrepancies:
-  - Corrected =CCSC01= (UI channel CSC) offset to =0xFA050= (was incorrectly =0xFA000=).
-  - Disabled TCON CCIR CSC by setting bit 19 of =TCON0_HV_IF_REG=.
-  - Corrected ILI9881C init command =0xCF= (was =0xBF=) and standardized reset sequence.
-- Ensured all Channel 1 VEP unit bases are cleared to prevent stale state.
-- Explicitly disabled TCON gamma table in =lcdc_init= as a defensive measure.
-- Fully disabled =DCSC= (Display Color Space Conversion) and =SMBL= (Smart Backlight) by clearing their base registers (=0xB0000= and =0x60000=). On NCAT2, DCSC use bit 1 for enable if SMBL is present.
-
-** 4.2 D-PHY & Combo PHY Refinements [DONE]
-- Implemented =0x03000024= register check (IC version bits 0-2).
-- Applied =ANA1= bit 5 quirk if =ic_ver > 0= (required for T113-S/D1 stability).
-- Added explicit clearing of =COMBO_PHY_REG1= (0x114) and =COMBO_PHY_REG2= (0x118) to prevent interference from stale LVDS/Combo state.
-
-** 4.3 Testing & Validation [PAUSED]
-- [X] Verified fixes on physical hardware; intermittent "warmish color" currently not reproducible.
-- [X] Live register dump performed on target (2026-03-14) via =dump_display_settings.sh=.
-- Two findings recorded in =knowledge.org= for future investigation:
-  1. Linux =phy-sun6i-mipi-dphy.c= does not implement the IC version / ANA1 bit-5 quirk.
-  2. Linux leaves =COMBO_PHY_REG2= (0x118) at 0x14 instead of clearing it.
-- Paused in favour of Phase 5 (initramfs drm-splash). Resume if color shift reappears.
+* Phase 4: Integration and Refinement [DONE]
+Deep-dive comparison against Allwinner brandy-2.0 BSP identified and fixed all colour
+fidelity issues in the U-Boot display pipeline: corrected =CCSC01= offset (=0xFA050=),
+disabled TCON CCIR CSC (=HV_IF_REG= bit 19), fixed ILI9881C command =0xCF=, cleared
+DCSC/SMBL/VEP units, applied D-PHY =ANA1= bit-5 IC-version quirk, and zeroed stale
+Combo PHY registers. Display verified correct on hardware for both ILI9881C and EK79007.
+Two Linux divergences noted in =knowledge.org= §17 for Phase 7.
 
 * Phase 5: Early Splash via initramfs DRM
 Strategy change: U-Boot does not initialize the display. Panel stays cold through kernel
@@ -108,21 +92,13 @@ Use the OpenWrt FAT hook mechanism to inject drm-splash without any kernel rebui
 - This requires no kernel rebuild and no changes to the deployed initramfs.
 
 * Phase 6: EK79007 Panel Support in U-Boot [DONE]
-Add support for the Elitek EK79007 1024×600 4-lane MIPI DSI panel alongside the existing
-ILI9881C driver, so the same U-Boot binary can drive either panel via DTS switch.
+Backported =panel-elitek-ek79007.c= (1024×600, 4-lane, 51.2 MHz pixel clock) and verified
+on hardware. Reset convention and clock derivation match ILI9881C. All pipeline debug
+=printf= calls converted to =log_debug()= across all display drivers.
 
-** 6.1 Driver Backport [DONE]
-- Backported =panel-elitek-ek79007.c= from Linux =drivers/gpu/drm/panel/panel-ek79007.c=.
-- Added =CONFIG_VIDEO_LCD_EK79007=y= to =raft-gw-argon-vb_defconfig=.
-- DTS already had =compatible = "elitek,ek79007"= node under =&dsi= guarded by =#if 1=.
-- Reset sequence: assert (value=1) → release (value=0) + 120 ms wait, matching ILI9881C
-  convention on this hardware (GPIO_ACTIVE_LOW, physical HIGH = panel running).
-- Clock chain correct: 51.2 MHz pixel → 307.2 MHz DSI bit rate → 1224 MHz PLL (0.4% off,
-  limited by T113-S PLL M-bit constraint; same derivation mechanism as ILI9881C).
+* Phase 7: Linux Kernel Display Fidelity [TODO]
+Port the display fidelity fixes from U-Boot into the Linux =sun4i-drm= / =sun6i-dsi=
+driver stack so the panel renders correctly under Linux.
 
-** 6.2 Display Bring-up [DONE]
-- EK79007 panel verified working on hardware with U-Boot splash screen.
-- All debug =printf= calls across the display pipeline (=sunxi_lcd.c=, =lcdc.c=,
-  =sun6i_mipi_dsi.c=, =sunxi_de2.c=, =phy-sun6i-mipi-dphy.c=, =panel-ilitek-ili9881c.c=,
-  =panel-elitek-ek79007.c=) converted to =log_debug()= — silent by default, enabled via
-  =DEBUG= macro or board-level log configuration.
+Symptom: Linux shows vertical colour-banded stripes on the ILI9881C panel; U-Boot
+displays the same panel correctly after Phase 4 fixes.

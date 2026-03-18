@@ -1,682 +1,639 @@
-#+TITLE: Allwinner T113-S MIPI DSI Display — Complete Implementation Knowledge Base
-#+DATE: 2026-03-10
-#+DESCRIPTION: Comprehensive reference for implementing MIPI DSI display in U-Boot on Allwinner T113-S (sun20i-d1), covering the full pipeline from framebuffer to panel.
+#+TITLE: Allwinner T113-S MIPI DSI Display — Knowledge Base
+#+DATE: 2026-03-18
 
-* 1. Hardware Architecture Overview
+* 1. Hardware Architecture
 
 ** 1.1 Display Pipeline
-
-The full pipeline from framebuffer to panel, in data-flow order:
 
 #+begin_example
 RAM (Framebuffer)
       ↓
-Display Engine 2.0 (DE2) — reads pixels, composites layers
-      ↓  (internal bus, 399 MHz)
-TCON LCD0 — generates video timing (hsync/vsync/de)
-      ↓  (parallel pixel bus via CPU interface)
-DSI Host Controller — packetizes video into MIPI DSI packets
-      ↓  (serialized HS differential pairs)
-D-PHY — physical layer, drives 4 differential lane pairs
-      ↓  (4x HS lanes + 1 clock lane)
-ILI9881C Panel — 720x1280, video sync-pulse mode
+Display Engine 2.0 (DE2) — layer compositing (399 MHz)
+      ↓
+TCON LCD0 — video timing, CPU/trigger interface
+      ↓
+DSI Host Controller — MIPI DSI packet engine
+      ↓
+D-PHY — 4 HS data lanes + 1 clock lane
+      ↓
+Panel (ILI9881C 720×1280  or  EK79007 1024×600)
 #+end_example
 
 ** 1.2 Key Hardware Addresses
 
-| Component          | Base Address | CCU Clock Register | CCU Bus Register |
-|--------------------+--------------+--------------------+------------------|
-| CCU                | 0x02001000   | —                  | —                |
-| Display Engine 2.0 | 0x05000000   | 0x600              | 0x60c            |
-| TCON TOP           | 0x05460000   | —                  | 0xabc (DPSS_TOP) |
-| TCON LCD0          | 0x05461000   | 0xb60              | 0xb7c            |
-| DSI Host           | 0x05450000   | —                  | 0xb4c            |
-| D-PHY              | 0x05451000   | 0xb24              | 0xb4c (shared)   |
-| DE2 MUX0           | 0x05100000   | (via DE base)      | —                |
+| Component   | Base Address | CCU Clock | CCU Bus              |
+|-------------+--------------+-----------+----------------------|
+| CCU         | 0x02001000   | —         | —                    |
+| DE2         | 0x05000000   | 0x600     | 0x60c                |
+| DE2 Mixer0  | 0x05100000   | (via DE2) | —                    |
+| TCON TOP    | 0x05460000   | —         | 0xabc (DPSS_TOP)     |
+| TCON LCD0   | 0x05461000   | 0xb60     | 0xb7c                |
+| DSI Host    | 0x05450000   | —         | 0xb4c                |
+| D-PHY       | 0x05451000   | 0xb24     | 0xb4c (shared w/DSI) |
 
-** 1.3 Component Roles
-
-- *DE2*: Reads framebuffer pixels from RAM, handles layer compositing, outputs continuous pixel stream.
-- *TCON LCD0*: Timing controller. Generates hsync/vsync/data-enable signals. For DSI, the TCON uses its "CPU interface" output path with an automatic trigger counter that fires each frame.
-- *DSI Host*: Protocol engine. In video mode, receives pixel data from TCON, wraps in MIPI DSI long packets, and streams to DPHY. In LP mode, sends DCS commands to panel.
-- *D-PHY*: Serializes data onto 4 HS differential lane pairs at 399 Mbps/lane. Also has its own PLL and clock domain for the physical layer.
-- *Panel (ILI9881C)*: Receives MIPI DSI video stream in sync-pulse mode.
+Bus register pattern: BIT(16) = reset de-assert, BIT(0) = clock gate.
 
 * 2. Clock Tree
 
 ** 2.1 Source PLLs
 
-| PLL             | CCU Offset | Frequency   | Formula              | Purpose                      |
-|-----------------+------------+-------------+----------------------+------------------------------|
-| PLL_VIDEO0_4X   | 0x040      | 1596 MHz    | 24 MHz × 133 / 2     | Master display reference     |
-| PLL_VIDEO0_2X   | (derived)  | 798 MHz     | PLL_VIDEO0_4X / 2    | (unused in display path)     |
-| PLL_VIDEO0_1X   | (derived)  | 399 MHz     | PLL_VIDEO0_4X / 4    | DE2, TCON, DSI protocol      |
-| PLL_PERIPH0     | 0x020      | 600 MHz     | Fixed                | D-PHY digital core           |
+| PLL           | CCU Offset | Frequency | Purpose                  |
+|---------------+------------+-----------+--------------------------|
+| PLL_VIDEO0_4X | 0x040      | 1596 MHz  | Master display reference |
+| PLL_VIDEO0_1X | (derived)  | 399 MHz   | DE2, TCON, DSI protocol  |
+| PLL_PERIPH0   | 0x020      | 600 MHz   | D-PHY digital core       |
 
-*** PLL_VIDEO0 Register Detail (CCU 0x040)
+*** PLL_VIDEO0 (CCU 0x040) — Critical M-field quirk ⚠️
 
-| Field    | Bits  | Value | Notes                              |
-|----------+-------+-------+------------------------------------|
-| OUT_EN   | 31    | 1     | Output enable                      |
-| BIT(30)  | 30    | 1     | Must set per Linux probe sequence  |
-| LOCK_EN  | 29    | 1     | Lock enable                        |
-| EN       | 27    | 1     | PLL enable                         |
-| LDO_EN   | 25:24 | 3     | Both LDOs enabled                  |
-| LOCK     | 28    | —     | Read-only: 1 when locked           |
-| N (−1)   | 15:8  | 132   | N = 133, stored as N−1             |
-| M (−1)   | 1     | 1     | M = 2, stored as M−1. *BIT 1 ONLY* |
+The M field is *bit 1 only*, not bits 1:0. For 1596 MHz: N=133, M=2.
 
-⚠️ *Critical:* The M field is *bit 1 only*, not bits 1:0. For 1596 MHz you need N=133, M=2 (not N=66, M=1). Common mistake when porting from other Allwinner SoCs.
+| Field  | Bits | Stored value | Notes                               |
+|--------+------+--------------+-------------------------------------|
+| N (−1) | 15:8 | 132          | N=133, stored as N−1                |
+| M (−1) | 1    | 1            | M=2, stored as M−1. *BIT 1 ONLY*   |
 
-Readback formula: ~freq = 24 MHz × ((reg >> 8 & 0xff) + 1) / ((reg >> 1 & 0x1) + 1)~
+Readback: =freq = 24 × ((reg >> 8 & 0xff) + 1) / ((reg >> 1 & 0x1) + 1)= MHz
 
 ** 2.2 Clock Distribution
 
 #+begin_example
-PLL_VIDEO0_4X (1596 MHz)
-├── ÷4 → PLL_VIDEO0_1X (399 MHz)
-│   ├── DE_CLK (CCU 0x600):  BIT(31) | 0x1 → 399 MHz → DE2 mixer
-│   ├── TCON_LCD0_CLK (CCU 0xb60): BIT(31) | mux=0 → 399 MHz → TCON module input
-│   │   └── TCON0_DCLK register (TCON 0x44): ÷4 → 99.75 MHz (DSI timing reference)
-│   └── TCON_TOP gate (0x05460020 BIT(16)) → DSI protocol engine mod clock
-│
+PLL_VIDEO0_4X (1596 MHz) → ÷4 → PLL_VIDEO0_1X (399 MHz)
+  ├── DE_CLK (0x600):        BIT(31)|0x1 → 399 MHz → DE2 mixer
+  ├── TCON_LCD0_CLK (0xb60): mux=0 → 399 MHz → TCON module input
+  │   └── TCON0_DCLK div=4 → 99.75 MHz (DSI timing reference, not pixel clock)
+  └── TCON_TOP gate (0x05460020 BIT(16)) → DSI protocol engine
+
 PLL_PERIPH0 (600 MHz)
-└── MIPI_DSI_CLK (CCU 0xb24): mux=1, M=4 → 150 MHz → D-PHY digital core
+  └── MIPI_DSI_CLK (0xb24): mux=1, M=4 → 150 MHz → D-PHY digital core
 #+end_example
 
-*** Why TCON_LCD0_CLK = 399 MHz?
+TCON_LCD0_CLK = DSI bit rate per lane = pixel_clk × bpp / lanes.
+For ILI9881C: 66.528 × 24 / 4 = 399.168 Mbps ≈ 399 MHz.
 
-The DSI host requires TCON_LCD0_CLK = DSI_bit_rate_per_lane:
-- DSI bit rate = pixel_clock × bpp / lanes = 66.528 MHz × 24 / 4 = 399.168 Mbps
-- TCON_LCD0_CLK = PLL_VIDEO0_1X = 399 MHz ≈ 399.168 (close enough)
-- TCON internal dclk = TCON_LCD0_CLK / TCON_DIV = 399 / 4 = 99.75 MHz
-
-The TCON dclk is *not* the pixel clock. Linux comment: "dclk is required to run at 1/4 the DSI per-lane bit rate."
-
-** 2.3 Bus Gates and Resets
-
-All bus registers follow the pattern: BIT(16) = reset de-assert, BIT(0) = clock gate.
-
-| Register  | Address    | Module              |
-|-----------+------------+---------------------|
-| BUS_DE    | CCU 0x60c  | Display Engine 2.0  |
-| DPSS_TOP  | CCU 0xabc  | TCON TOP + DSI      |
-| BUS_TCON  | CCU 0xb7c  | TCON LCD0           |
-| BUS_DSI   | CCU 0xb4c  | DSI host + D-PHY    |
-
-Code sequence for each: ~setbits_le32(CCU_BASE + offset, BIT(16) | BIT(0))~
-
-** 2.4 Bus Clock vs Mod Clock
-
-| Type      | Purpose                           | Effect if missing                      |
-|-----------+-----------------------------------+----------------------------------------|
-| Bus clock | AHB/APB register access           | CPU hangs reading/writing registers    |
-| Mod clock | Functional logic, protocol engine | Registers accessible but module stalls |
+⚠️ MIPI_DSI_CLK source is PLL_PERIPH0 (mux index 1), *not* PLL_VIDEO0_2X (index 0).
 
 * 3. Display Engine 2.0 (DE2)
 
 ** 3.1 Structure
 
-The DE2 has two mixers (MUX0 at 0x05100000, MUX1 at 0x05200000). For a single display, use MUX0. Each mixer contains:
-
-- *Global registers* (MUX0 + 0x0000): enable, size, double-buffer
-- *Channel registers* (MUX0 + 0x2000 + N×0x1000): UI or VI layers
-- *Blender registers* (MUX0 + 0x1000): composites channels to output
-
-U-Boot uses channel 1 (UI layer) feeding into blender pipe 0.
+Mixer0 (base 0x05100000) sub-blocks:
+- *Global* (+0x0000): enable, output size, double-buffer commit
+- *Blender* (+0x1000): composites channels to output
+- *UI Channel 1* (+0x3000): framebuffer layer
 
 ** 3.2 Initialization Sequence
 
 #+begin_src c
-/* 1. Enable DE mod clock: PLL_VIDEO0_1X (gate + source) */
+/* Enable DE mod clock */
 writel(BIT(31) | 1, CCU_BASE + 0x600);
-
-/* 2. Enable DE bus gate + reset */
 setbits_le32(CCU_BASE + 0x60c, BIT(16) | BIT(0));
 
-/* 3. Enable mixer clock gate and reset inside DE */
-setbits_le32(&de_clk_regs->rst_cfg, BIT(mux));
-setbits_le32(&de_clk_regs->gate_cfg, BIT(mux));
-setbits_le32(&de_clk_regs->bus_cfg, BIT(mux));
-clrbits_le32(&de_clk_regs->sel_cfg, 1);
+/* DE internal clocks (mixer 0) */
+setbits_le32(&de_clk->rst_cfg,  BIT(0));
+setbits_le32(&de_clk->gate_cfg, BIT(0));
+setbits_le32(&de_clk->bus_cfg,  BIT(0));
+clrbits_le32(&de_clk->sel_cfg, 1);          /* source = PLL_VIDEO0_1X */
 
-/* 4. Global: enable mixer, set output size */
-writel(SUNXI_DE2_MUX_GLB_CTL_EN, &de_glb_regs->ctl);
-writel(0, &de_glb_regs->status);
-writel(1, &de_glb_regs->dbuff);          /* commit = 1 */
-writel(size, &de_glb_regs->size);
+/* Global: enable, size, double-buffer */
+writel(SUNXI_DE2_MUX_GLB_CTL_EN, &de_glb->ctl);
+writel(1,    &de_glb->dbuff);
+writel(size, &de_glb->size);
 
-/* 5. Clear all channels and blender */
+/* Clear channels, blender, and all quirk registers (see §3.3) */
 memset(channels, 0, ...);
-memset(de_bld_regs, 0, sizeof(struct de_bld));
+memset(de_bld, 0, sizeof(*de_bld));
+writel(0, mixer_base + 0xB0000);            /* DCSC */
+writel(0, mixer_base + 0x60000);            /* SMBL */
+for (u32 off = 0xF0000; off <= 0xF8000; off += 0x2000)
+    writel(0, mixer_base + off);            /* VEP units */
 
-/* 6. Configure blender */
-writel(BIT(8), &de_bld_regs->fcolor_ctl);   /* PIPE_CTL: enable pipe 0 */
-writel(1,      &de_bld_regs->route);         /* pipe 0 ← channel 1 */
-writel(0,      &de_bld_regs->premultiply);
-writel(0xff000000, &de_bld_regs->bkcolor);
-writel(0x03010301, &de_bld_regs->bld_mode[0]);
-writel(size,   &de_bld_regs->output_size);
-writel(0,      &de_bld_regs->out_ctl);       /* progressive */
-writel(0,      &de_bld_regs->ck_ctl);
-writel(0xff000000, &de_bld_regs->attr[0].fcolor);
-writel(size,   &de_bld_regs->attr[0].insize);
+/* Blender */
+writel(BIT(8),     &de_bld->fcolor_ctl);    /* PIPE_CTL: pipe 0 enable ← see §3.3 */
+writel(1,          &de_bld->route);          /* pipe 0 ← channel 1 */
+writel(0,          &de_bld->premultiply);
+writel(0xff000000, &de_bld->bkcolor);
+writel(0x03010301, &de_bld->bld_mode[0]);
+writel(size,       &de_bld->output_size);
+writel(0,          &de_bld->out_ctl);
 
-/* 7. Configure UI layer (channel 1) */
-writel(SUNXI_DE2_UI_CFG_ATTR_EN | format, &de_ui_regs->cfg[0].attr);
-writel(size,    &de_ui_regs->cfg[0].size);
-writel(0,       &de_ui_regs->cfg[0].coord);
-writel(pitch,   &de_ui_regs->cfg[0].pitch);     /* bytes per line */
-writel(fb_addr, &de_ui_regs->cfg[0].top_laddr); /* framebuffer address */
-writel(size,    &de_ui_regs->ovl_size);
-
-/* 8. Commit double buffer to apply all settings */
-writel(1, &de_glb_regs->dbuff);
+/* UI layer (channel 1) */
+writel(SUNXI_DE2_UI_CFG_ATTR_EN | fmt, &ui->cfg[0].attr);
+writel(size,    &ui->cfg[0].size);
+writel(0,       &ui->cfg[0].coord);
+writel(pitch,   &ui->cfg[0].pitch);
+writel(fb_addr, &ui->cfg[0].top_laddr);
+writel(size,    &ui->ovl_size);
+writel(1, &de_glb->dbuff);                  /* commit */
 #+end_src
 
-** 3.3 Critical Register: PIPE_CTL
+** 3.3 Critical Quirks
 
-⚠️ *U-Boot Bug:* The register at offset 0x00 in ~struct de_bld~ is named ~fcolor_ctl~ in the struct definition, but it is actually the *PIPE_CTL* register in hardware.
+*** PIPE_CTL naming bug (U-Boot struct)
+~de_bld->fcolor_ctl~ is mislabelled in the U-Boot struct. In hardware it is *PIPE_CTL*
+(blender pipe 0 control at blender offset 0x00). *Bit 8 must be set* to enable pipe 0.
+Without it the blender produces no output regardless of all other settings.
 
-| Bits | Field        | Value   | Meaning                                    |
-|------+--------------+---------+--------------------------------------------|
-| 8    | PIPE_CTL_EN0 | 1       | Enable pipe 0 output — *required*          |
-| 3:0  | FC_EN        | 0       | Use channel data (not fill color)          |
+*** CCSC register offsets (NCAT2/D1) ⚠️
 
-Without bit 8 set, the blender produces no output regardless of all other settings.
+| Channel | Unit  | Mixer Offset | Notes                            |
+|---------+-------+--------------+----------------------------------|
+| 0 (VI)  | CCSC0 | 0xAA050      | VI channel CSC control           |
+| 1 (UI)  | FCC1  | 0xFA000      | *Base* of UI1 enhancement unit   |
+| 1 (UI)  | CCSC1 | 0xFA050      | *UI1 CSC control* (not 0xFA000)  |
 
-** 3.4 Working Register Values (720x1280, bpp=32)
+Many drivers use 0xFA000 for CCSC01 — this is the FCC1 base, not the CSC register.
+The correct UI channel CSC control offset is *0xFA050*.
 
-| Register    | Offset | Value      | Notes                       |
-|-------------+--------+------------+-----------------------------|
-| PIPE_CTL    | 0x00   | 0x00000100 | Pipe 0 enabled              |
-| ROUTE       | 0x80   | 0x00000001 | Pipe 0 source = channel 1   |
-| ATTR.INSIZE | 0x08   | 0x04ff02cf | (1279<<16) | 719           |
-| OUTSIZE     | 0x8c   | 0x04ff02cf | Same as INSIZE              |
-| BLD_MODE[0] | 0x90   | 0x03010301 | Standard alpha blend        |
-| OUTCTL      | 0xfc   | 0x00000000 | Progressive                 |
+Linux =sun8i_csc.h= defines =CCSC01_D1_OFFSET = 0xFA000= for =sun20i-d1-de2-mixer-0=,
+which conflicts with this finding. Resolution pending Phase 7 runtime register dump.
 
-* 4. TCON LCD0 (Timing Controller)
+*** DCSC and SMBL must be disabled
+On NCAT2, DCSC (base 0xB0000) and SMBL (base 0x60000) must be cleared to 0 during
+init. Stale state from previous boots or Linux video playback causes colour artifacts.
+DCSC uses bit 1 as its enable when SMBL is present.
 
-** 4.1 Role in DSI Video Mode
+*** VEP units must be cleared
+Clear the five VEP unit bases (FCE 0xF0000, BWS 0xF2000, LTI 0xF4000,
+PEAK 0xF6000, ASE 0xF8000) to prevent stale enhancement from affecting output.
 
-Despite the name "CPU interface," the TCON does *not* operate in command mode for DSI video. It generates a continuous parallel video stream (pixels + sync signals) that feeds the DSI host controller. The TCON's trigger counter (~TRI~) fires automatically each frame, causing the TCON to push one frame of pixel data to the DSI.
+* 4. TCON LCD0
 
-** 4.2 Clock Setup
+** 4.1 Role in DSI Mode
+
+The TCON operates in "CPU interface" mode. It generates a continuous pixel stream and
+an autonomous trigger counter (TRI) fires once per frame to push data into the DSI host.
+This is not software-triggered — the TCON is self-sustaining once TRI_EN is set.
+
+** 4.2 Clock and Routing Setup
 
 #+begin_src c
-/* DPSS_TOP bus gate + reset */
-setbits_le32(CCU_BASE + 0xabc, BIT(16) | BIT(0));
-
-/* TCON_LCD0_CLK: source = PLL_VIDEO0_1X (mux=0), no divider, gate on */
-writel(BIT(31) | (0 << 24), CCU_BASE + 0xb60);
-
-/* BUS_TCON_LCD0: gate + reset */
-setbits_le32(CCU_BASE + 0xb7c, BIT(16) | BIT(0));
+setbits_le32(CCU_BASE + 0xabc, BIT(16) | BIT(0));   /* DPSS_TOP gate + reset */
+writel(BIT(31) | (0 << 24), CCU_BASE + 0xb60);       /* TCON_LCD0_CLK = PLL_VIDEO0_1X */
+setbits_le32(CCU_BASE + 0xb7c, BIT(16) | BIT(0));   /* TCON bus gate + reset */
+sunxi_tcon_top_setup(mixer=0, tcon=0);               /* mixer0 → TCON LCD0, DSI gate */
 #+end_src
-
-Then call ~sunxi_tcon_top_setup(mixer=0, tcon=0)~ to:
-1. Route DE mixer 0 → TCON LCD0 (bits 1:0 of PORT_SEL = 0)
-2. Enable DSI gate in TCON TOP (GATE_SRC BIT(16))
 
 ** 4.3 TCON Register Configuration
 
 #+begin_src c
-/* TCON global enable */
-setbits_le32(&lcdc->ctrl, SUNXI_LCDC_CTRL_TCON_ENABLE);  /* bit 31 */
-
-/* TCON0 control: enable + 8080/CPU IF mode + clk_delay */
+setbits_le32(&lcdc->ctrl, SUNXI_LCDC_CTRL_TCON_ENABLE);       /* bit 31 */
 writel(SUNXI_LCDC_TCON0_CTRL_ENABLE |
-       SUNXI_LCDC_TCON0_CTRL_IF_8080 |          /* bit 24: CPU IF mode */
-       SUNXI_LCDC_TCON0_CTRL_CLK_DELAY(delay),  /* bits 7:4: max 30    */
-       &lcdc->tcon0_ctrl);
-
-/* TCON dclk: enable + divide by SUN6I_DSI_TCON_DIV = 4 */
+       SUNXI_LCDC_TCON0_CTRL_IF_8080 |                        /* CPU IF mode */
+       SUNXI_LCDC_TCON0_CTRL_CLK_DELAY(delay), &lcdc->tcon0_ctrl);
 writel(SUNXI_LCDC_TCON0_DCLK_ENABLE | SUNXI_LCDC_TCON0_DCLK_DIV(4),
        &lcdc->tcon0_dclk);
-
-/* Timing: active size, H total/BP, V total/BP, sync lengths */
-writel(SUNXI_LCDC_X(hactive) | SUNXI_LCDC_Y(vactive),
-       &lcdc->tcon0_timing_active);
-...
-
-/* CPU interface: DSI mode + trigger FIFO enable + trigger counter enable */
+/* ... timing registers (active size, htotal, vtotal, sync widths) ... */
 writel(SUNXI_LCDC_TCON0_CPU_IF_MODE_DSI | BIT(2) | BIT(0),
-       &lcdc->tcon0_cpu_intf);
-/* BIT(2) = TRI_FIFO_EN, BIT(0) = TRI_EN */
+       &lcdc->tcon0_cpu_intf);                                 /* TRI_FIFO_EN + TRI_EN */
 #+end_src
 
-** 4.4 Critical: TRI Trigger Counter Registers ⚠️
+** 4.4 Critical: CCIR CSC Disable ⚠️
 
-These three registers are *not in the U-Boot lcdc struct* (they fall in a padding gap). They must be accessed via absolute offset from the TCON base. Without them, the TCON is enabled but *never starts sending frames*.
+Bit 19 of =TCON0_HV_IF_REG= (offset 0x58) must be *set to 1* to disable the CCIR
+colour space converter. Without this, a YCbCr matrix is applied to the RGB stream
+causing a strong colour shift (blue → purple/pink). Expected value: =0x00080000=.
 
-| Register | TCON Offset | Field                      | Purpose                          |
-|----------+-------------+----------------------------+----------------------------------|
-| TRI0     | 0x160       | BLOCK_SPACE, BLOCK_SIZE    | Horizontal timing for trigger    |
-| TRI1     | 0x164       | BLOCK_NUM                  | Number of lines (vdisplay)       |
-| TRI2     | 0x168       | START_DELAY, TRANS_START   | When to fire each frame trigger  |
+In Linux: done in =sun4i_tcon0_mode_set_cpu()= for all DSI encoder types.
 
-*** TRI Register Calculation (from Linux ~sun4i_tcon0_mode_set_cpu()~)
+** 4.5 Critical: TRI Trigger Counter ⚠️
 
+These three registers are *not in the U-Boot lcdc struct* (padding gap). Access via
+absolute offset from TCON base. Without TRI_EN the TCON never sends frames — this
+was the root cause of the original "no display" bug.
+
+| Register | TCON Offset | Purpose                              |
+|----------+-------------+--------------------------------------|
+| TRI0     | 0x160       | Horizontal timing (block_space/size) |
+| TRI1     | 0x164       | Block count (vdisplay lines)         |
+| TRI2     | 0x168       | Start delay + trans_start            |
+
+Calculation (mirrors Linux =sun4i_tcon0_mode_set_cpu()=):
 #+begin_src c
-u32 htotal    = hactive + hfp + hsync + hbp;
-u32 vtotal    = vactive + vfp + vsync + vbp;
-u32 tcon_div  = 4;   /* SUN6I_DSI_TCON_DIV */
-u32 lanes     = 4;   /* DSI lanes */
-u32 bpp       = 24;  /* bits per pixel */
-
-/* block_space: horizontal blanking budget in TCON clock cycles */
+u32 tcon_div = 4, lanes = 4, bpp = 24;
 u32 block_space = htotal * bpp / (tcon_div * lanes) - hactive - 40;
-
-/* start_delay: delay before first frame trigger, in TCON clock units */
-/* pixelclock_MHz = pixelclock_Hz / 1000000 (integer division) */
-u32 start_delay = (vtotal - vactive - 10 - 1) * htotal * 149;
-start_delay /= (pixelclock_Hz / 1000000);
-start_delay /= 8;
-
-/* TRI0 */
-writel(((block_space - 1) & 0xfff) << 16 | ((hactive - 1) & 0xfff),
-       (void *)(tcon_base + 0x160));
-/* TRI1 */
-writel((vactive - 1) & 0xffff,
-       (void *)(tcon_base + 0x164));
-/* TRI2 */
-writel(((start_delay & 0xffff) << 16) | 10,
-       (void *)(tcon_base + 0x168));
+u32 start_delay = (vtotal - vactive - 10 - 1) * htotal * 149
+                  / (pixelclock_Hz / 1000000) / 8;     /* integer MHz division */
+writel((block_space - 1) << 16 | (hactive - 1), tcon_base + 0x160); /* TRI0 */
+writel(vactive - 1,                              tcon_base + 0x164); /* TRI1 */
+writel((start_delay & 0xffff) << 16 | 10,        tcon_base + 0x168); /* TRI2 */
 #+end_src
 
-*** Verified Values (720x1280, 66.528 MHz pixel clock)
-
-| Register | Expected Value | Notes                             |
-|----------+----------------+-----------------------------------|
-| TRI0     | 0x01f302cf     | block_space=500, block_size=720   |
-| TRI1     | 0x000004ff     | block_num=1280                    |
-| TRI2     | 0x1ada000a     | start_delay=6874, trans_start=10  |
-
+Verified values for ILI9881C 720×1280 @ 66.528 MHz:
 #+begin_example
-block_space = 840 × 24 / (4 × 4) − 720 − 40 = 1260 − 760 = 500
-start_delay = 29 × 840 × 149 / 66 / 8 = 3629640 / 66 / 8 = 6874
-  where: vtotal−vactive−11 = 1320−1280−11 = 29
-         pixelclock_MHz = 66528000 / 1000000 = 66 (integer)
+block_space = 840 × 24 / (4 × 4) − 720 − 40 = 500
+start_delay = 29 × 840 × 149 / 66 / 8 = 6874
+  (vtotal−vactive−11 = 1320−1280−11 = 29; pixelclock_MHz = 66528000/1000000 = 66)
+TRI0 = 0x01f302cf,  TRI1 = 0x00d004ff,  TRI2 = 0x1ada000a
 #+end_example
 
-** 4.5 CPU Interface Register (TCON 0x60)
+** 4.6 CPU Interface Register (TCON 0x60)
 
-| Bit | Field          | Value | Meaning                              |
-|-----+----------------+-------+--------------------------------------|
-| 31:28 | MODE         | 0x1   | DSI mode                             |
-| 16  | TRI_FIFO_FLUSH | 1→0   | Pulse to flush trigger FIFO          |
-| 2   | TRI_FIFO_EN    | 1     | Enable trigger FIFO — *required*     |
-| 0   | TRI_EN         | 1     | Enable trigger counter — *required*  |
-
-Final value after flush: ~0x10000005~
-
-** 4.6 Why TCON Outputs Nothing Without TRI_EN
-
-The TCON CPU interface does not automatically start outputting video when enabled. The trigger counter (~TRI_EN~) is the mechanism that causes the TCON to autonomously fire a new frame at the right time relative to the DSI video start delay. Without ~TRI_EN~ set, the TCON simply waits indefinitely for a software trigger that never comes.
-
-This was the *root cause* of the U-Boot "no display" bug: all clocks, DE2, DSI, and DPHY were configured correctly, but the TCON never pushed data.
+Expected final value: =0x10000005=
+- Bits 31:28 = 0x1: DSI mode
+- Bit 16: TRI_FIFO_FLUSH (pulse only; write 1 then clear, reads back 0)
+- Bit 2: TRI_FIFO_EN
+- Bit 0: TRI_EN
 
 * 5. DSI Host Controller
 
 ** 5.1 Initialization Sequence
 
 #+begin_src c
-/* 1. Enable DSI block */
-writel(SUN6I_DSI_CTL_EN, dsi->regs + SUN6I_DSI_CTL_REG);
-
-/* 2. Enable ECC + CRC, instruction sequencer starts after commit */
-writel(SUN6I_DSI_BASIC_CTL0_ECC_EN | SUN6I_DSI_BASIC_CTL0_CRC_EN,
-       dsi->regs + SUN6I_DSI_BASIC_CTL0_REG);
-
-/* 3. Set transfer start threshold and zero */
-writel(10, dsi->regs + SUN6I_DSI_TRANS_START_REG);
-writel(0,  dsi->regs + SUN6I_DSI_TRANS_ZERO_REG);
-
-/* 4. Initialize instruction functions (LP11, TBA, HSC, HSD, LPDT, etc.) */
+writel(SUN6I_DSI_CTL_EN, dsi + 0x000);
+writel(SUN6I_DSI_BASIC_CTL0_ECC_EN | SUN6I_DSI_BASIC_CTL0_CRC_EN, dsi + 0x010);
+writel(10, dsi + 0x060);  /* TRANS_START */
+writel(0,  dsi + 0x078);  /* TRANS_ZERO  */
 sun6i_dsi_inst_init(dsi, device);
+writel(0xff, dsi + SUN6I_DSI_DEBUG_DATA_REG);
 
-/* 5. Write debug data marker */
-writel(0xff, dsi->regs + SUN6I_DSI_DEBUG_DATA_REG);
-
-/* 6. Set BASIC_CTL1: video mode + timing delay */
-delay = sun6i_dsi_get_video_start_delay(dsi, timings);
+delay = sun6i_dsi_get_video_start_delay(dsi, mode);
 writel(SUN6I_DSI_BASIC_CTL1_VIDEO_ST_DELAY(delay) |
-       SUN6I_DSI_BASIC_CTL1_VIDEO_FILL |
+       SUN6I_DSI_BASIC_CTL1_VIDEO_FILL      |
        SUN6I_DSI_BASIC_CTL1_VIDEO_PRECISION |
-       SUN6I_DSI_BASIC_CTL1_VIDEO_MODE,
-       dsi->regs + SUN6I_DSI_BASIC_CTL1_REG);
+       SUN6I_DSI_BASIC_CTL1_VIDEO_MODE,       /* bit 0 — REQUIRED */
+       dsi + 0x014);
 
-/* 7. Setup burst, inst loop, format, timings */
-sun6i_dsi_setup_burst(dsi, timings);
-sun6i_dsi_setup_inst_loop(dsi, timings);
-sun6i_dsi_setup_format(dsi, timings);
-sun6i_dsi_setup_timings(dsi, timings);
-
-/* 8. PHY init and power on */
-generic_phy_configure(&dsi->dphy, &cfg);
-generic_phy_power_on(&dsi->dphy);
+sun6i_dsi_setup_burst(dsi, mode);
+sun6i_dsi_setup_inst_loop(dsi, mode);
+sun6i_dsi_setup_format(dsi, mode);
+sun6i_dsi_setup_timings(dsi, mode);
 #+end_src
 
-** 5.2 Panel Initialization (LP Mode)
+** 5.2 Critical: BASIC_CTL1 VIDEO_MODE (bit 0) ⚠️
 
-After DSI init, panel DCS commands are sent via the LPDT instruction path before video mode starts. The sequence:
-
-1. Power on panel supply, assert/deassert reset
-2. Send 190 vendor-specific init commands (short and long writes)
-3. Send ~exit_sleep_mode~ (0x11), wait ≥120ms
-4. Send ~set_display_on~ (0x29)
-
-** 5.3 Enable Video Mode
-
-#+begin_src c
-/* Start HS clock */
-sun6i_dsi_start(dsi, DSI_START_HSC);
-udelay(1000);
-
-/* Start HS data stream (continuous loop) */
-sun6i_dsi_start(dsi, DSI_START_HSD);
-#+end_src
-
-The ~DSI_START_HSD~ instruction sequence: ~LP11 → NOP → HSD → DLY → NOP → HSD → ...~ (infinite loop).
-
-** 5.4 Critical Register: BASIC_CTL1
+*If bit 0 is not set, DSI ignores TCON data entirely and only responds to LP commands.*
 
 #+begin_example
-0x000051f7 (working Linux value)
-  Bits 15:4 = 0x51f = 1311  → VIDEO_ST_DELAY
-  Bit 2 = 1                  → VIDEO_FILL
-  Bit 1 = 1                  → VIDEO_PRECISION
-  Bit 0 = 1                  → VIDEO_MODE  ← REQUIRED for any video output
+Expected BASIC_CTL1 ≈ 0x000051f7
+  Bits 15:4 = 0x51f (1311) → VIDEO_ST_DELAY
+  Bit 2 = VIDEO_FILL
+  Bit 1 = VIDEO_PRECISION
+  Bit 0 = VIDEO_MODE  ← REQUIRED
 #+end_example
 
-*If bit 0 (VIDEO_MODE) is not set, DSI will only respond to LP commands and never output video, regardless of all other settings.*
-
-*** VIDEO_ST_DELAY Calculation
-
+VIDEO_ST_DELAY:
 #+begin_src c
-u32 vtotal       = vactive + vfp + vbp + vsync;
-u32 vactive_end  = vactive + vfp;       /* end of active, start of blanking */
 u16 delay = vtotal - vfp + 1;
 if (delay > vtotal) delay %= vtotal;
 delay = max(delay, 1);
 #+end_src
 
-** 5.5 DSI Instruction Modes
+** 5.3 Video Mode Enable
 
-| ID       | Mode    | Purpose                             |
-|----------+---------+-------------------------------------|
-| LP11     | STOP    | LP-11 idle state                    |
-| HSC      | HS      | HS clock enable                     |
-| HSD      | HS      | HS data (video pixel stream)        |
-| LPDT     | ESCAPE  | LP data transmission (DCS commands) |
-| HSCEXIT  | HSCEXIT | Exit HS clock                       |
-| NOP      | STOP    | No-op / blanking gap                |
-| DLY      | NOP     | Delay between HSD bursts            |
+#+begin_src c
+sun6i_dsi_start(dsi, DSI_START_HSC);   /* start HS clock */
+udelay(1000);
+sun6i_dsi_start(dsi, DSI_START_HSD);   /* start HS data continuous loop */
+#+end_src
 
-** 5.6 Working Register State (After Video Enable)
+** 5.4 DSI Instruction Modes
 
-| Register         | Offset | Value      | Notes                             |
-|------------------+--------+------------+-----------------------------------|
-| CTL              | 0x000  | 0x01010001 | DSI enabled                       |
-| BASIC_CTL        | 0x00c  | 0x00000000 | Sync-pulse mode (no burst bits)   |
-| BASIC_CTL0       | 0x010  | 0x00030001 | ECC_EN + CRC_EN + INST_ST running |
-| BASIC_CTL1       | 0x014  | 0x000051f7 | VIDEO_MODE + delay=1311           |
-| INST_JUMP_SEL    | 0x048  | 0x63f07006 | HSD continuous loop               |
-| INST_JUMP_CFG[0] | 0x04c  | 0x00560001 | Jump config                       |
+| ID   | Mode   | Purpose                              |
+|------+--------+--------------------------------------|
+| LP11 | STOP   | LP-11 idle state                     |
+| HSC  | HS     | HS clock enable                      |
+| HSD  | HS     | HS data (video pixel stream)         |
+| LPDT | ESCAPE | LP data transmission (DCS commands)  |
+| DLY  | NOP    | Delay between HSD bursts             |
 
-INST_ST (BASIC_CTL0 bit 0) = 1 means the instruction sequencer is running. Checking this ~500ms after ~sun6i_dsi_enable()~ confirms the HSD loop is live.
+** 5.5 Working Register State
+
+| Register      | Offset | Value      | Notes                          |
+|---------------+--------+------------+--------------------------------|
+| CTL           | 0x000  | 0x01010001 | DSI enabled                    |
+| BASIC_CTL     | 0x00c  | 0x00000000 | Sync-pulse mode (no burst)     |
+| BASIC_CTL0    | 0x010  | 0x00030001 | ECC+CRC+INST_ST running        |
+| BASIC_CTL1    | 0x014  | 0x000051f7 | VIDEO_MODE + delay=1311        |
+| INST_JUMP_SEL | 0x048  | 0x63f07006 | HSD continuous loop            |
+
+INST_ST (BASIC_CTL0 bit 0) = 1 confirms the HSD loop is live.
+
+** 5.6 DSI Bus Clock Gating Under Linux
+
+Linux power-manages =BUS_MIPI_DSI_GATING= (CCU 0xb4c) BIT(0) off after HSD starts.
+The D-PHY lane stream continues but all DSI/D-PHY register reads return 0. To read
+registers on a live Linux system, temporarily re-enable BIT(0) before reading.
 
 * 6. D-PHY
 
 ** 6.1 Clock Setup
 
 #+begin_src c
-/* MIPI_DSI_CLK: source = PLL_PERIPH0 (mux=1), M=4 (divide by M+1=4) */
-/* PLL_PERIPH0 = 600 MHz / 4 = 150 MHz */
-writel(BIT(31) | (1 << 24) | 3, CCU_BASE + 0xb24);
-/* Value: 0x81000003 */
+/* PLL_PERIPH0 (mux=1) ÷ 4 = 150 MHz */
+writel(BIT(31) | (1 << 24) | 3, CCU_BASE + 0xb24);  /* 0x81000003 */
 #+end_src
 
-⚠️ Source is PLL_PERIPH0 (index 1 in mipi_dsi_parents[]), *not* PLL_VIDEO0_2X (index 0). Confirm from ~ccu-sun20i-d1.c~.
+** 6.2 IC Version Quirk (NCAT2) ⚠️
 
-** 6.2 DPHY Timings (399 Mbps/lane)
+Register =0x03000024= bits [2:0] = IC version. If =ic_ver > 0=, bit 5 of D-PHY
+=ANA1= (offset 0x50) *must be set* for physical layer stability.
 
-Computed by ~phy_mipi_dphy_get_default_config()~ from pixel clock, bpp, and lanes:
+On the test board: ic_ver = 3 → ANA1 = =0x80000020= (bit 31 | bit 5).
 
-| Parameter | Value  |
-|-----------+--------|
-| hs_prep   | 25     |
-| hs_trail  | 35     |
-| clk_prep  | 19     |
-| clk_zero  | 131    |
+*Linux gap:* =phy-sun6i-mipi-dphy.c= does not implement this check. Live readback
+(2026-03-14) showed ANA1 = =0x80000000= (bit 5 absent). Display operates but with
+reduced signal margin. Fix needed in Linux PHY driver for Phase 7.
 
-** 6.3 DPHY Register State (Working)
+** 6.3 Combo PHY Register Hygiene
 
-| Register  | Offset | Value      |
-|-----------+--------+------------|
-| GCTL      | 0x00   | 0x00000031 |
-| ANA0      | 0x4c   | 0x00000044 |
-| ANA1      | 0x50   | 0x80000000 |
-| ANA2      | 0x54   | 0x0f000012 |
-| ANA3      | 0x58   | 0xff040000 |
-| PLL_REG0  | 0x104  | 0x00f78582 |
-| PLL_REG1  | 0x108  | 0x00000481 |
+Stale LVDS state in =COMBO_PHY_REG1= (0x114) and =COMBO_PHY_REG2= (0x118) causes
+intermittent flickering. Zero both explicitly before DSI configuration.
 
-* 7. Panel (ILI9881C)
+*Linux gap (2026-03-14):* COMBO_PHY_REG2 = =0x14= (not cleared by Linux PHY driver).
+If flickering occurs under Linux, zeroing this register is the first fix to try.
 
-** 7.1 Specifications
+** 6.4 Working Register State
 
-| Parameter    | Value         |
-|--------------+---------------|
-| Resolution   | 720 × 1280    |
-| DSI lanes    | 4             |
-| DSI mode     | Video (sync-pulse) |
-| Pixel format | RGB888 (24bpp) |
-| Pixel clock  | 66.528 MHz    |
-| DSI bit rate | 399.168 Mbps/lane |
+| Register       | Offset | Value      | Notes                           |
+|----------------+--------+------------+---------------------------------|
+| GCTL           | 0x000  | 0x00000031 | 4 lanes, enabled                |
+| ANA0           | 0x04c  | 0x00000044 |                                 |
+| ANA1           | 0x050  | 0x80000020 | Bit 5 set (ic_ver=3 quirk)      |
+| ANA2           | 0x054  | 0x0f000012 |                                 |
+| ANA3           | 0x058  | 0xff040000 |                                 |
+| PLL_REG0       | 0x104  | 0x00f78582 | D-PHY PLL enabled               |
+| COMBO_PHY_REG1 | 0x114  | 0x00000000 | Must be cleared                 |
+| COMBO_PHY_REG2 | 0x118  | 0x00000000 | Must be cleared (Linux leaves 0x14) |
 
-** 7.2 Timing Parameters
+* 7. Panels
 
-| Parameter  | Value | Notes               |
-|------------+-------+---------------------|
-| hactive    | 720   |                     |
-| hfp        | 20    | Horizontal FP       |
-| hsync      | 10    | Horizontal sync     |
-| hbp        | 40    | Horizontal BP       |
-| htotal     | 790   | (derived: but TCON uses 840 due to DSI byte padding — see note) |
-| vactive    | 1280  |                     |
-| vfp        | 30    | Vertical FP         |
-| vsync      | 10    | Vertical sync       |
-| vbp        | 20    | Vertical BP         |
-| vtotal     | 1340  | (but TCON vtotal=1320 — verify from register readback) |
+** 7.1 ILI9881C — hd50004c30 (720×1280)
 
-Note: The htotal used in TRI calculations (840) may differ from the panel timing structure due to DSI byte-alignment padding. Always use the value read back from the TCON register.
+| Parameter   | Value                           |
+|-------------+---------------------------------|
+| Resolution  | 720 × 1280                      |
+| Pixel clock | 66.528 MHz                      |
+| DSI lanes   | 4                               |
+| DSI format  | RGB888                          |
+| Mode flags  | VIDEO | VIDEO_SYNC_PULSE | LPM  |
+| DSI bit rate| 399.168 Mbps/lane               |
 
-** 7.3 DSI mode_flags
+Timing (htotal=840, vtotal=1320):
 
-#+begin_src c
-mode_flags = MIPI_DSI_MODE_VIDEO              /* 0x001 */
-           | MIPI_DSI_MODE_VIDEO_SYNC_PULSE   /* 0x004 */
-           | MIPI_DSI_MODE_LPM                /* 0x400 */
-           | MIPI_DSI_MODE_EOT_PACKET;        /* 0x800 */
-/* Combined: 0xc05 */
-#+end_src
+| Axis        | Active | FP | Sync | BP | Convention             |
+|-------------+--------+----+------+----+------------------------|
+| Horizontal  | 720    | 40 | 10   | 70 | DRM / Linux            |
+| Horizontal  | 720    | 70 | 10   | 40 | display_timing / U-Boot|
+| Vertical    | 1280   | 10 | 10   | 20 | DRM / Linux            |
+| Vertical    | 1280   | 20 | 10   | 10 | display_timing / U-Boot|
 
-** 7.4 Initialization Sequence
+FP/BP values are swapped between the two naming conventions. Totals (840, 1320)
+are identical and both produce correct output on hardware.
 
-1. Enable power supply (~vcc-dsi-supply~, ~vcc-panel-supply~)
-2. Assert reset low (≥10ms), then release high (≥10ms)
-3. Send 190 DCS init commands (LP mode via LPDT)
-4. Send ~exit_sleep_mode~ (0x11) — wait ≥120ms for display to wake
-5. Send ~set_display_on~ (0x29)
-6. Switch DSI to HS video mode (DSI_START_HSC + DSI_START_HSD)
+Initialization:
+1. Enable power supplies, assert reset (≥10 ms), release (≥10 ms)
+2. Send 190 vendor-specific DCS init commands via LP/LPDT
+3. =exit_sleep_mode= (0x11) — wait ≥120 ms
+4. =set_display_on= (0x29)
+5. Switch DSI to HS video mode (HSC → HSD)
+
+Key fix: Page 1 register 0xCF — some sources incorrectly list as 0xBF. 0xCF is correct.
+
+** 7.2 EK79007 (1024×600)
+
+| Parameter   | Value                                           |
+|-------------+-------------------------------------------------|
+| Resolution  | 1024 × 600                                      |
+| Pixel clock | 51.2 MHz                                        |
+| DSI lanes   | 4                                               |
+| DSI format  | RGB888                                          |
+| Mode flags  | VIDEO | VIDEO_SYNC_PULSE | CLOCK_NON_CONTINUOUS | LPM |
+| HFP/HBP/HSA | 160 / 160 / 10                                 |
+| VFP/VBP/VSA | 12 / 23 / 1                                    |
+| Physical    | 154 mm × 86 mm                                  |
+
+Clock chain: pixel_clk=51.2 MHz → bit rate=307.2 Mbps → PLL_4X=1224 MHz
+(n=51, m=1; 0.4% off ideal 1228.8 MHz — PLL M-bit limit, within tolerance).
+
+Reset GPIO: =reset-gpios = <&pio 4 1 GPIO_ACTIVE_LOW>= (PE1, active-low).
+Sequence: assert (dm_gpio=1 → physical LOW) → 15 ms → release (dm_gpio=0 → HIGH)
+→ 120 ms → send commands.
+
+DSI LP commands (9 total, verified):
+#+begin_example
+0x80=0xAC  0x81=0xB8  0x82=0x09  0x83=0x78
+0x84=0x7F  0x85=0xBB  0x86=0x70
+0x11 (exit_sleep, +120 ms)   0x29 (set_display_on)
+#+end_example
 
 * 8. U-Boot Implementation
 
-** 8.1 Files Modified
+** 8.1 Source Files
 
-| File                                              | Change                                  |
-|---------------------------------------------------+-----------------------------------------|
-| ~drivers/video/sunxi/lcdc.c~                      | Added TRI registers + TRI_EN/FIFO_EN    |
-| ~drivers/video/sunxi/sunxi_de2.c~                 | Fixed PIPE_CTL bit 8                    |
-| ~drivers/video/sunxi/sun6i_mipi_dsi.c~            | BASIC_CTL1 VIDEO_MODE + DSI enable      |
-| ~drivers/video/sunxi/sunxi_lcd.c~                 | DSI clock calculation + TCON setup      |
-| ~arch/arm/include/asm/arch-sunxi/clock_sun50i_h6.h~ | Fixed PLL_VIDEO0 M field (bit 1 only) |
+| File (under u-boot/)                                         | Role                       |
+|--------------------------------------------------------------+----------------------------|
+| drivers/video/sunxi/sun6i_mipi_dsi.c                         | DSI host driver            |
+| drivers/video/sunxi/sunxi_de2.c                              | DE2 display engine         |
+| drivers/video/sunxi/sunxi_lcd.c                              | TCON glue layer            |
+| drivers/video/sunxi/lcdc.c                                   | TCON register-level driver |
+| drivers/video/panel-ilitek-ili9881c.c                        | ILI9881C panel driver      |
+| drivers/video/panel-elitek-ek79007.c                         | EK79007 panel driver       |
+| arch/arm/include/asm/arch-sunxi/clock_sun50i_h6.h            | CCU clock helpers          |
+| dts/upstream/src/arm/allwinner/sun8i-t113s-raft-gw-argon-vb.dts | Board DTS              |
 
-** 8.2 Known Bugs Fixed
+All debug calls use =log_debug()= — silent by default, enabled via =#define DEBUG=.
 
-*** Bug 1: PLL_VIDEO0 M Field
-
-*Symptom:* PLL locked but at wrong frequency.
-*Root cause:* M field is bit 1 only (not bits 1:0). For 1596 MHz, need N=133, M=2.
-*Fix:* Special-case in ~clock_set_pll3()~ for the 1596 MHz range.
-
-*** Bug 2: DE2 PIPE_CTL Mislabeled
-
-*Symptom:* DE2 configured, DSI running, TCON running — but no pixels.
-*Root cause:* ~de_bld_regs->fcolor_ctl~ is actually PIPE_CTL in hardware. Bit 8 enables pipe 0.
-*Fix:* Write ~BIT(8)~ to ~&de_bld_regs->fcolor_ctl~. (Label wrong, hardware correct.)
-
-*** Bug 3: TCON TRI Registers Not Configured ← Root Cause of "No Display"
-
-*Symptom:* Entire pipeline initialized, DSI HSD loop running (INST_ST=1), yet blank screen.
-*Root cause:* U-Boot never configured the TCON trigger counter (TRI0/TRI1/TRI2) or set TRI_EN + TRI_FIFO_EN in CPU_IF register. Without TRI_EN, the TCON never autonomously outputs frames to the DSI.
-*Fix:* Added TRI register setup in ~lcdc_tcon0_mode_set()~ using the same formula as Linux ~sun4i_tcon0_mode_set_cpu()~.
-
-*** Bug 4: DSI VIDEO_MODE Bit
-
-*Symptom:* DSI sends LP commands fine, but no video output.
-*Root cause:* BASIC_CTL1 bit 0 (VIDEO_MODE) must be set before HSD; without it DSI ignores TCON data.
-*Fix:* Already set in ~sun6i_dsi_init()~ via BASIC_CTL1 write.
-
-** 8.3 Correct Enable Ordering
+** 8.2 Correct Initialization Order
 
 #+begin_example
-1. CCU: Enable all bus clocks and resets
-2. DE2: Enable mod clock, configure UI layer + blender, commit double-buffer
-3. TCON: Enable bus clock, configure timing + TRI registers, set TRI_EN + TRI_FIFO_EN
-4. TCON TOP: Route mixer → TCON, enable DSI gate
-5. DSI: Enable bus clock, configure registers, power up DPHY
-6. Panel: Send 190 init commands (LP/LPDT mode)
-7. Panel: Send exit_sleep + display_on
-8. DSI: Start HSC then HSD (video mode)
-9. TCON: Pulse TRI_FIFO_FLUSH (then restore TRI_EN/FIFO_EN)
-10. Framebuffer now flows: RAM → DE2 → TCON → DSI → DPHY → Panel
+1. CCU — all bus gates and resets
+2. DE2 — mod clock, clear quirk registers, UI layer, blender, commit
+3. TCON — bus clock, timing registers, TRI0/1/2, TRI_EN + TRI_FIFO_EN
+4. TCON TOP — route mixer→TCON LCD0, enable DSI gate
+5. DSI — bus clock, register config, D-PHY power on
+6. Panel — init commands (LP mode via LPDT)
+7. Panel — exit_sleep + display_on
+8. DSI — start HSC then HSD (video mode)
 #+end_example
 
-* 9. Debug Methodology
+** 8.3 Bugs Fixed
 
-** 9.1 Pipeline Verification Checklist
+| Bug                                 | Symptom                              | Fix                                      |
+|-------------------------------------+--------------------------------------+------------------------------------------|
+| PLL_VIDEO0 M-field (1 bit, not 2)   | Wrong PLL frequency                  | Special-case in =clock_set_pll3()=       |
+| DE2 PIPE_CTL mislabelled in struct  | No pixels despite complete init      | Write BIT(8) to =de_bld->fcolor_ctl=    |
+| TCON TRI registers not configured   | Blank screen, DSI HSD loop running   | Add TRI0/1/2 + TRI_EN in =lcdc.c=       |
+| DSI BASIC_CTL1 VIDEO_MODE missing   | LP commands work, no video           | Set bit 0 of BASIC_CTL1                 |
+| TCON CCIR CSC enabled               | Blue→purple colour shift             | Set bit 19 of TCON0_HV_IF_REG           |
+| CCSC01 at wrong offset (0xFA000)    | Potential CSC corruption             | Use 0xFA050 for UI channel CSC           |
+| DCSC/SMBL/VEP not cleared           | Colour artifacts on warm boot        | Zero base registers during init          |
+| ILI9881C command 0xBF (wrong)       | Panel init failure / wrong colour    | Use 0xCF (confirmed from Allwinner BSP) |
+| D-PHY ANA1 bit 5 (ic_ver quirk)     | Signal margin risk                   | Set bit 5 if ic_ver > 0                  |
+| Combo PHY stale LVDS state          | Intermittent flickering              | Zero COMBO_PHY_REG1 and REG2            |
 
-When "no display" after init, check each stage in order:
+* 9. Linux Driver Notes (Phase 7)
 
-| Stage      | What to verify                    | Register / Command                        |
-|------------+-----------------------------------+-------------------------------------------|
-| Clocks     | PLL locked? Correct frequency?    | ~clock_get_pll3()~ readback               |
-| DE2        | UI layer EN? Correct FB address?  | Read ~de_ui_regs->cfg[0].attr/top_laddr~  |
-| DE2        | PIPE_CTL bit 8 set?               | Read ~de_bld_regs->fcolor_ctl~            |
-| TCON       | TCON0_CTRL bit 31 set?            | Read ~lcdc->tcon0_ctrl~                   |
-| TCON       | CPU_INTF has TRI_EN + FIFO_EN?    | Read ~lcdc->tcon0_cpu_intf~ — expect ~0x10000005~ |
-| TCON       | TRI2 start_delay configured?      | ~md.l tcon_base+0x168 1~                  |
-| DSI        | BASIC_CTL1 VIDEO_MODE set?        | Read ~dsi->regs + 0x014~ — bit 0 = 1     |
-| DSI        | INST_ST still set after 500ms?    | Read ~dsi->regs + 0x010~ — bit 0 = 1     |
-| Panel      | LP commands succeeded?            | Check for DSI_LP log lines without errors |
+** 9.1 Driver File Locations (linux/)
 
-** 9.2 U-Boot Commands for Live Register Inspection
+| File                                                              | Role                          |
+|-------------------------------------------------------------------+-------------------------------|
+| arch/arm/boot/dts/allwinner/sun8i-t113s-raft-gw-argon-vb.dts    | Board DTS (panel-skip-init)   |
+| drivers/gpu/drm/sun4i/sun4i_tcon.c                                | TCON, CCIR CSC disable        |
+| drivers/gpu/drm/sun4i/sun6i_mipi_dsi.c                            | DSI host, VIDEO_MODE, skip    |
+| drivers/gpu/drm/sun4i/sun8i_mixer.c                               | DE2 mixer config              |
+| drivers/gpu/drm/sun4i/sun8i_csc.c / sun8i_csc.h                  | CCSC offsets                  |
+| drivers/gpu/drm/panel/panel-ilitek-ili9881c.c                     | Panel driver                  |
+
+** 9.2 panel-skip-init Behaviour
+
+With =panel-skip-init= in DTS, on *first boot only* (guarded by static bool):
+- =ili9881c_prepare()=: skips power-on, reset, init commands, exit_sleep
+- =ili9881c_enable()=: skips set_display_on
+- =sun6i_dsi_enable()=: skips D-PHY init and power-on
+
+Subsequent blank/unblank cycles perform full re-initialization.
+
+** 9.3 Confirmed Correct in Linux
+
+- TCON CCIR CSC: disabled in =sun4i_tcon0_mode_set_cpu()= for all DSI encoders.
+- DSI BASIC_CTL1 VIDEO_MODE: set unconditionally in =sun6i_dsi_enable()=.
+- Panel timing: identical 720×1280 @ 66.528 MHz.
+- Panel init commands: identical sequence.
+
+** 9.4 Linux Gaps vs U-Boot (Phase 7 Suspects)
+
+| Issue                    | U-Boot              | Linux                          | Risk                     |
+|--------------------------+---------------------+--------------------------------+--------------------------|
+| CCSC01 offset            | 0xFA050 (fixed)     | 0xFA000 (=CCSC01_D1_OFFSET=)  | Possible CSC corruption  |
+| D-PHY ANA1 bit 5         | Set if ic_ver > 0   | Not implemented                | Reduced signal margin    |
+| COMBO_PHY_REG2           | Cleared to 0        | Left at 0x14                   | Intermittent flicker     |
+
+Root cause of Linux vertical stripes: unconfirmed — pending runtime dmesg comparison
+against the baseline register state in §10.
+
+* 10. Baseline Register State (ILI9881C 720×1280, Verified Good)
+
+Captured 2026-03-13. Use for regression comparison.
+
+** 10.1 DE2 Mixer0 (base 0x05100000)
+
+| Register | Offset | Value      | Description                          |
+|----------+--------+------------+--------------------------------------|
+| GLB_CTL  | 0x0000 | 0x00000001 | Mixer enabled                        |
+| GLB_SIZE | 0x000c | 0x04ff02cf | 720×1280 ((h−1)<<16 | (w−1))        |
+| PIPE_CTL | 0x1000 | 0x00000100 | Pipe 0 enabled (bit 8)               |
+| ROUTE    | 0x1080 | 0x00000001 | Channel 1 → pipe 0                   |
+| BLD_MODE | 0x1090 | 0x03010301 | Standard alpha blend                 |
+| UI1_ATTR | 0x3000 | 0x00000401 | Enabled + XRGB8888 (fmt=4)           |
+| UI1_SIZE | 0x3004 | 0x04ff02cf | 720×1280                             |
+| UI1_LADD | 0x3010 | 0x4e000000 | Framebuffer base address             |
+| MUX_CSC  | 0x1b000| 0x00000000 | Mixer-level CSC disabled             |
+
+** 10.2 TCON LCD0 (base 0x05461000)
+
+| Register  | Offset | Value      | Description                          |
+|-----------+--------+------------+--------------------------------------|
+| GCTL      | 0x0000 | 0x80000000 | TCON enabled                         |
+| TCON0_CTL | 0x0040 | 0x81070031 | Enabled + CPU_IF mode + delay        |
+| TCON0_DCLK| 0x0044 | 0xf0000004 | Enabled + div=4 → 99.75 MHz          |
+| BASIC0    | 0x0048 | 0x04ff02cf | Active area                          |
+| HV_IF     | 0x0058 | 0x00080000 | CCIR CSC disabled (bit 19)           |
+| CPU_IF    | 0x0060 | 0x10000005 | DSI mode + TRI_FIFO_EN + TRI_EN      |
+| TRI0      | 0x0160 | 0x01f302cf | block_space=500, block_size=720      |
+| TRI1      | 0x0164 | 0x00d004ff | block_num=1280                       |
+| TRI2      | 0x0168 | 0x1ada000a | start_delay=6874, trans_start=10    |
+
+** 10.3 DSI Host (base 0x05450000)
+
+| Register   | Offset | Value      | Description                     |
+|------------+--------+------------+---------------------------------|
+| CTL        | 0x000  | 0x01010001 | DSI enabled                     |
+| BASIC_CTL  | 0x00c  | 0x00000000 | Sync-pulse mode, no burst       |
+| BASIC_CTL0 | 0x010  | 0x00030001 | ECC+CRC enabled, INST_ST=1      |
+| BASIC_CTL1 | 0x014  | 0x000051f7 | VIDEO_MODE + start_delay=1311   |
+| JUMP_SEL   | 0x048  | 0x63f07006 | HSD continuous loop             |
+
+** 10.4 D-PHY (base 0x05451000)
+
+| Register       | Offset | Value      | Description                           |
+|----------------+--------+------------+---------------------------------------|
+| GCTL           | 0x000  | 0x00000031 | 4 lanes, enabled                      |
+| ANA0           | 0x04c  | 0x00000044 |                                       |
+| ANA1           | 0x050  | 0x80000020 | Bit 5 set (ic_ver=3 quirk applied)    |
+| ANA2           | 0x054  | 0x0f000012 |                                       |
+| ANA3           | 0x058  | 0xff040000 |                                       |
+| PLL_REG0       | 0x104  | 0x00f78582 | PLL enabled                           |
+| COMBO_PHY_REG1 | 0x114  | 0x00000000 | Cleared (U-Boot); Linux leaves 0      |
+| COMBO_PHY_REG2 | 0x118  | 0x00000000 | Cleared (U-Boot); Linux leaves 0x14   |
+
+* 11. Debug Methodology
+
+** 11.1 Pipeline Verification Checklist
+
+| Stage  | Check                         | How                                         |
+|--------+-------------------------------+---------------------------------------------|
+| Clocks | PLL locked, correct frequency | =clock_get_pll3()= readback                 |
+| DE2    | UI layer EN, PIPE_CTL bit 8   | Read de_ui/de_bld registers                 |
+| TCON   | TRI_EN + TRI_FIFO_EN set      | Read CPU_IF — expect =0x10000005=           |
+| TCON   | TRI2 start_delay set          | Read TCON+0x168                             |
+| DSI    | BASIC_CTL1 bit 0 = 1          | Read DSI+0x014                              |
+| DSI    | INST_ST = 1 after 500 ms      | Read DSI+0x010 bit 0                        |
+| Panel  | LP commands succeeded         | Check log for LPDT lines without errors     |
+
+** 11.2 U-Boot Register Commands
 
 #+begin_src bash
-# Clock registers
-md.l 0x02001040 1    # PLL_VIDEO0_4X
-md.l 0x02001600 1    # DE mod clock
-md.l 0x02001b60 1    # TCON_LCD0_CLK
-md.l 0x02001b24 1    # MIPI_DSI_CLK
-
-# TCON0 registers
-md.l 0x05461040 1    # TCON0_CTRL (bit 31 = enabled)
-md.l 0x05461060 1    # CPU_INTF (expect 0x10000005)
+md.l 0x02001040 1    # PLL_VIDEO0
+md.l 0x05461060 1    # TCON CPU_IF  (expect 0x10000005)
 md.l 0x05461160 3    # TRI0, TRI1, TRI2
-
-# DSI registers
-md.l 0x05450000 1    # CTL
-md.l 0x05450010 2    # BASIC_CTL0, BASIC_CTL1
-
-# DE2 blender (MUX0)
-md.l 0x05101000 1    # PIPE_CTL (expect 0x00000100)
-md.l 0x05101080 1    # ROUTE
-
-# Framebuffer write test
-mw.l 0x4e000000 0xffff0000 0x100000   # fill with red
+md.l 0x05450014 1    # DSI BASIC_CTL1 (bit 0 must be 1)
+md.l 0x05101000 1    # DE2 PIPE_CTL  (bit 8 must be 1)
+mw.l 0x4e000000 0xffff0000 0x100000  # fill framebuffer red (pipeline test)
 #+end_src
 
-** 9.3 Interpreting INST_ST
+* 12. Development Environment
 
-After ~sun6i_dsi_enable()~, read BASIC_CTL0 (0x05450010) after a 500ms delay:
-- *Bit 0 = 1*: HSD instruction loop is running → DSI is actively streaming video
-- *Bit 0 = 0*: Loop terminated (JUMP_CFG triggered, or TCON stopped feeding data)
+** 12.1 Target Access
 
-** 9.4 Key "Gotcha" Summary
+| Property    | Value                     |
+|-------------+---------------------------|
+| IP          | 192.168.13.100            |
+| User/Pass   | root / " " (single space) |
+| Serial      | /dev/ttyUSB0, 115200 bps  |
 
-1. *PLL M field* is 1 bit (bit 1), not 2 bits — easy to mistake on T113-S vs other Allwinner SoCs
-2. *DE2 fcolor_ctl* is actually PIPE_CTL — struct naming bug in U-Boot
-3. *VIDEO_MODE bit* in DSI BASIC_CTL1 must be set or DSI ignores TCON data entirely
-4. *TCON TRI_EN* must be set or TCON never sends frames to DSI
-5. *TRI start_delay* calculation requires integer MHz division (~pixelclock_Hz / 1000000~), matching Linux's ~crtc_clock / 1000~ semantics
-6. *Bus clock must precede mod clock* — enabling mod clock first with bus clock off can hang the CPU
-6. *Double-buffer commit* (~dbuff=1~) must be written after each batch of DE2 register changes
-
-** 9.5 DSI Bus Clock Gating Under Linux
-
-Linux power-manages =BUS_MIPI_DSI_GATING= (CCU 0xb4c) BIT(0) off after the HSD video
-stream starts. The AHB bus clock is gated but the D-PHY functional clock (=MIPI_DSI_CLK=
-0xb24) remains enabled, so the physical lane stream continues uninterrupted.
-
-*Symptom:* All DSI (0x05450000) and D-PHY (0x05451000) register reads return 0 on a
-running Linux system, even though the display is active.
-
-*Workaround for =dump_display_settings.sh=:* Temporarily set BIT(0) of 0x02001b4c before
-reading DSI/DPHY registers, then restore the original value. The script does this
-automatically around the D-PHY and DSI sections.
-
-** 9.6 Clock Gating & Register Behavior
-
-A critical behavior to note during register inspection on Allwinner SoCs:
-
-- *Clock Gating*: If a module's clock (usually the bus clock or module-specific gate) is disabled, attempting to read its control registers will often return *0* rather than the actual hardware state.
-- *Verification*: If you can read *any* non-zero value from a module's register space, it is a definitive indicator that the clock for that module is enabled and functional.
-- *Ambiguity*: A return value of 0 is ambiguous—it could mean the register is legitimately 0, or it could mean the module is currently clock-gated. Always verify the corresponding CCU gate/reset bits if a module returns all zeros.
-
-* 10. Seamless Kernel Handoff (Phase 5)
-
-** 10.1 Disruption Windows
-
-When Linux boots, the display pipeline passes through multiple drivers. Each
-transition is a potential disruption window:
-
-#+begin_example
-U-Boot (sun6i DSI driver, splash screen active)
-    ↓  [Window 1] ~1–2 s — U-Boot ends, kernel boots, no one owns display
-simplefb (kernel inherits U-Boot's live framebuffer)
-    ↓  [Window 2] ~200–400 ms — DRM takes over, panel reset in ili9881c_prepare()
-sun4i-drm + sun6i-dsi (full KMS stack)
-    ↓  [Window 3] variable — app loading time, display blank until first modeset
-Application UI
-#+end_example
-
-** 10.2 Window 1 Eliminated: simplefb Handoff [DONE]
-
-=sunxi_simplefb_setup()= in =board/sunxi/board.c= patches the kernel DTB at boot
-time (called from =ft_board_setup()= during =booti=) to activate a pre-existing stub
-node in the kernel DTS. The kernel's =simplefb= driver then attaches to the live
-U-Boot framebuffer — no hardware reconfiguration, no visible gap.
-
-*Required U-Boot config* (=configs/raft-gw-argon-vb_defconfig=):
-#+begin_src
-CONFIG_OF_BOARD_SETUP=y
-CONFIG_VIDEO_DT_SIMPLEFB=y
+#+begin_src bash
+sshpass -p " " ssh root@192.168.13.100 "<command>"
+sshpass -p " " scp <file> root@192.168.13.100:/mnt/
 #+end_src
 
-*Required kernel DTS stub* (=chosen= node in board DTS):
+** 12.2 Build and Deploy (Linux kernel)
+
+#+begin_src bash
+source ~/.scripts/setup-oe.sh
+cd ~/Downloads/b-linux
+rmake ~/workspace/sys-in/splash/linux raft-gw-argon-vb_defconfig
+rmake ~/workspace/sys-in/splash/linux zImage dtbs -j$(nproc)
+
+sshpass -p " " scp arch/arm/boot/zImage root@192.168.13.100:/mnt/
+sshpass -p " " scp arch/arm/boot/dts/allwinner/sun8i-t113s-raft-gw-argon-vb.dtb \
+    root@192.168.13.100:/mnt/sunxi.dtb
+#+end_src
+
+=rmake= wrapper: =make -C "$1" O="$(pwd)" "${@:2}"=
+
+Build directory: =~/Downloads/b-linux= (note: =~/Download= in vibe.org is a typo;
+the actual path is =~/Downloads=).
+
+** 12.3 Boot Log Capture
+
+#+begin_src bash
+sshpass -p " " ssh root@192.168.13.100 "reboot" &
+sleep 3 && stty -F /dev/ttyUSB0 115200 raw -echo && timeout 90 cat /dev/ttyUSB0
+#+end_src
+
+* 13. Phase 5 Learnings (initramfs / simplefb)
+
+Preserved for reference. Strategy explored in Phase 5: U-Boot cold panel → Linux DRM
+clean init → drm-splash from initramfs. Current approach (Phase 7) has U-Boot
+displaying a splash and Linux inheriting the initialized panel via =panel-skip-init=.
+
+** 13.1 simplefb Handoff
+
+=sunxi_simplefb_setup()= (=board/sunxi/board.c=) patches the kernel DTB at =booti=
+time to activate the =framebuffer-lcd0= stub. Linux =simplefb= attaches to the live
+U-Boot framebuffer without hardware reconfiguration.
+
+Required DTS stub in =chosen= node (=status= patched to "okay" at runtime):
 #+begin_src dts
 framebuffer-lcd0 {
     compatible = "allwinner,simple-framebuffer", "simple-framebuffer";
@@ -684,478 +641,42 @@ framebuffer-lcd0 {
     clocks = <&ccu CLK_BUS_DE>, <&ccu CLK_DE>,
              <&ccu CLK_BUS_TCON_LCD0>, <&ccu CLK_TCON_LCD0>,
              <&ccu CLK_MIPI_DSI>;
-    status = "disabled";  /* U-Boot patches to "okay" at runtime */
+    status = "disabled";
 };
 #+end_src
 
-The =clocks= list keeps all display pipeline clocks gated on while simplefb is the
-active framebuffer owner. Pipeline name =mixer0-lcd0= identifies the T113-S DSI path.
+⚠️ =ft_board_setup()= is only called during =booti=/=bootm=, not =run bmp-disp=.
 
-*Confirmed working* — kernel log:
-#+begin_example
-[1.363582] simple-framebuffer 4e000000.framebuffer: framebuffer at 0x4e000000, 0x384000 bytes
-[1.363643] simple-framebuffer 4e000000.framebuffer: format=x8r8g8b8, mode=720x1280x32, linelength=2880
-[1.364218] simple-framebuffer 4e000000.framebuffer: fb0: simplefb registered!
-[1.381193] sun4i-drm display-engine: bound 5100000.mixer ...
-[3.212610] sun6i-mipi-dsi 5450000.dsi: Attached device hd50004c30
-#+end_example
+** 13.2 CONFIG_DRM_SIMPLEDRM Conflict — Do Not Enable
 
-⚠️ *=ft_board_setup()= is NOT called during manual =run bmp-disp=.* It is only invoked
-by =booti=/=bootm= when an FDT blob is passed. This caused early confusion where
-simplefb setup appeared to not run.
+With =sun4i-drm=, enabling =CONFIG_DRM_SIMPLEDRM=y= causes a NULL pointer dereference
+in =of_drm_find_panel= during =sun6i_dsi_attach=. Root cause: two DRM drivers bind
+simultaneously; =drm_aperture_remove_conflicting_framebuffers()= corrupts the panel
+list mid-probe. Use =CONFIG_FB=y= + =CONFIG_FB_SIMPLE=y= (legacy fbdev) instead.
 
-** 10.3 CONFIG_DRM_SIMPLEDRM Causes Kernel Crash — Do Not Enable
+** 13.3 drm-splash Binary
 
-Enabling =CONFIG_DRM_SIMPLEDRM=y= with =sun4i-drm= causes a NULL pointer dereference:
+Static ARM binary (855 KB): =drm-splash/dist/usr/bin/drm-splash=.
+Opens =/dev/dri/card0=, allocates XRGB8888 dumb buffer, blits BMP/SPLR image,
+calls =drmModeSetCrtc=, drops DRM master, blocks on SIGTERM.
 
-#+begin_example
-Unable to handle kernel NULL pointer dereference at virtual address 00000004
-PC is at of_drm_find_panel+0x5c
-LR is at sun6i_dsi_attach+0x34
-#+end_example
-
-Root cause: two DRM drivers bind simultaneously (simpledrm on minor 0, sun4i-drm on
-minor 1). When sun4i-drm calls =drm_aperture_remove_conflicting_framebuffers()= to
-evict simpledrm, it corrupts the DRM panel list mid-probe. =of_drm_find_panel= in
-=sun6i_dsi_attach= then dereferences the stale list entry.
-
-*Correct approach*: use =CONFIG_FB=y= + =CONFIG_FB_SIMPLE=y= (legacy fbdev). The fbdev
-simplefb driver has no DRM conflict and does not trigger the aperture eviction path.
-
-** 10.4 Window 2 Plan: Panel Skip-Init [PLANNED]
-
-Add =panel-skip-init= property to the kernel DTS =panel@0= node and guard
-=ili9881c_prepare()= to skip the reset on first boot:
-
-#+begin_src dts
-panel@0 {
-    compatible = "huadichuangxian,hd50004c30", "ilitek,ili9881c";
-    panel-skip-init;
-    /* ... other properties unchanged ... */
-};
-#+end_src
-
-#+begin_src c
-static bool ili9881c_first_boot = true;
-
-static int ili9881c_prepare(struct drm_panel *panel)
-{
-    struct ili9881c *ctx = panel_to_ili9881c(panel);
-
-    if (ili9881c_first_boot &&
-        of_property_read_bool(ctx->dsi->dev.of_node, "panel-skip-init")) {
-        dev_info(panel->dev, "Skipping panel init (already configured by bootloader)\n");
-        ili9881c_first_boot = false;
-        return 0;
-    }
-    ili9881c_first_boot = false;
-    /* ... existing reset + DCS init sequence ... */
-}
-#+end_src
-
-The static flag ensures the skip applies only once per boot; suspend/resume cycles
-will perform the full re-initialization as expected.
-
-** 10.5 Window 3 Plan: Framebuffer Console [PLANNED]
-
-Enable the kernel framebuffer console so boot messages print to the LCD continuously,
-keeping the display active from DRM takeover until the application's first frame:
-
-#+begin_src
-CONFIG_FRAMEBUFFER_CONSOLE=y
-CONFIG_FRAMEBUFFER_CONSOLE_DETECT_PRIMARY=y
-#+end_src
-
-With =FB_SIMPLE= registered as =fb0=, fbcon attaches automatically. When sun4i-drm
-loads, fbcon migrates to DRM fbdev emulation. The display shows kernel/userspace boot
-messages throughout — no blank screen between DRM init and app start.
-
-Optional: =CONFIG_LOGO=y= + =CONFIG_LOGO_LINUX_CLUT224=y= shows Tux logo before console text.
-
-* 11. Development Environment
-
-** 11.1 Target Device Access
-
-| Property    | Value                    |
-|-------------+--------------------------|
-| IP          | 192.168.13.100           |
-| User        | root                     |
-| Password    | (single space)           |
-| Serial port | /dev/ttyUSB0, 115200 bps |
-
-SSH with password authentication (use =sshpass=):
-#+begin_src bash
-sshpass -p " " ssh root@192.168.13.100 "<command>"
-sshpass -p " " scp <local> root@192.168.13.100:<remote>
-#+end_src
-
-** 11.2 Serial Console Monitoring
-
-Capture boot log from /dev/ttyUSB0:
-#+begin_src bash
-# Reboot and capture (run reboot in background, then capture serial)
-sshpass -p " " ssh root@192.168.13.100 "reboot" & \
-  sleep 3 && stty -F /dev/ttyUSB0 115200 raw -echo && timeout 90 cat /dev/ttyUSB0
-#+end_src
-
-The 3-second sleep allows the reboot command to reach the target before the
-serial capture starts. Adjust timeout (90 s) as needed for full boot capture.
-
-** 11.3 Kernel Out-of-Tree Build
-
-Build directory: =~/Downloads/b-linux= (note: ~/Download is a typo — the real
-path is ~/Downloads)
-
-Workflow:
-#+begin_src bash
-# First time: configure
-cd ~/Downloads/b-linux
-source ~/.scripts/setup-oe.sh    # sets ARCH=arm, CROSS_COMPILE=...
-rmake ~/workspace/sys-in/splash/linux raft-gw-argon-vb_defconfig
-
-# Build kernel + DTB
-rmake ~/workspace/sys-in/splash/linux zImage dtbs -j$(nproc)
-
-# Artifacts
-# Kernel: ~/Downloads/b-linux/arch/arm/boot/zImage
-# DTB:    ~/Downloads/b-linux/arch/arm/boot/dts/allwinner/sun8i-t113s-raft-gw-argon-vb.dtb
-#+end_src
-
-=rmake= is a thin wrapper: ~make -C "$1" O="$(pwd)" "${@:2}"~
-
-** 11.4 Deploy to Target
-
-#+begin_src bash
-# Deploy kernel and DTB (DTB must be renamed to sunxi.dtb on target)
-sshpass -p " " scp ~/Downloads/b-linux/arch/arm/boot/zImage \
-    root@192.168.13.100:/mnt/
-sshpass -p " " scp ~/Downloads/b-linux/arch/arm/boot/dts/allwinner/sun8i-t113s-raft-gw-argon-vb.dtb \
-    root@192.168.13.100:/mnt/sunxi.dtb
-#+end_src
-
-* 12. Reference Files
-
-** U-Boot Source (in ~/workspace/sys-in/splash/u-boot)
-
-| File                                              | Role                              |
-|---------------------------------------------------+-----------------------------------|
-| ~drivers/video/sunxi/sun6i_mipi_dsi.c~            | DSI host driver                   |
-| ~drivers/video/sunxi/sunxi_de2.c~                 | DE2 display engine driver         |
-| ~drivers/video/sunxi/sunxi_lcd.c~                 | TCON LCD driver (glue layer)      |
-| ~drivers/video/sunxi/lcdc.c~                      | TCON register-level driver        |
-| ~arch/arm/include/asm/arch-sunxi/clock_sun50i_h6.h~ | CCU clock helpers               |
-| ~arch/arm/include/asm/arch-sunxi/lcdc.h~          | TCON register struct + defines    |
-
-** Linux Kernel Reference
-
-| File                                                    | Role                       |
-|---------------------------------------------------------+----------------------------|
-| ~drivers/gpu/drm/sun4i/sun6i_mipi_dsi.c~               | DSI host (ground truth)    |
-| ~drivers/gpu/drm/sun4i/sun4i_tcon.c~                   | TCON (TRI register logic)  |
-| ~drivers/gpu/drm/sun4i/sun4i_tcon.h~                   | TCON register definitions  |
-| ~drivers/gpu/drm/sun4i/sun8i_ui_layer.c~               | DE2 UI layer               |
-| ~drivers/gpu/drm/sun4i/sun8i_mixer.h~                  | DE2 mixer defines          |
-| ~drivers/clk/sunxi-ng/ccu-sun20i-d1.c~                 | CCU clock definitions      |
-
-** Log Files
-
-| File                    | Contents                                                  |
-|-------------------------+-----------------------------------------------------------|
-| ~yes_display.dmesg~     | Linux kernel log when display works (reference state)     |
-| ~no_display.dmesg~      | Linux kernel log after U-Boot failed (shows DSI state)    |
-
-* 13. Color Fidelity & Initialization Quirks (NCAT2/T113-S)
-
-Discovered during investigation of intermittent "warmish color" issues on warm reboots.
-
-** 13.1 CCSC (Channel Color Space Conversion) Offsets
-
-On NCAT2 (D1/T113-S), the CCSC register offsets differ from other DE2.0 SoCs. Stale values from a previous boot (e.g. Linux YUV playback) can cause color distortion if not explicitly cleared.
-
-| Channel | Unit | Offset (relative to mixer base) | Purpose |
-|---------+------+---------------------------------+---------|
-| 0 (VI)  | FCC0 | 0xAA000                         | Base of VI0 enhancement unit |
-| 0 (VI)  | CCSC | 0xAA050                         | VI0 Color Space Conversion |
-| 1 (UI)  | FCC1 | 0xFA000                         | Base of UI1 enhancement unit |
-| 1 (UI)  | CCSC | 0xFA050                         | UI1 Color Space Conversion |
-
-⚠️ *Critical:* Many U-Boot drivers incorrectly use 0xFA000 for CCSC01. The correct offset for the CSC control register is *0xFA050*.
-
-** 13.2 TCON CCIR CSC Disable
-
-In DSI Video/Burst modes, the TCON must explicitly disable CCIR color space conversion to avoid "warm" or "sepia" color shifts.
-
-- *Register*: ~TCON0_HV_IF_REG~ (Offset 0x58)
-- *Bit*: 19 (~ccir_csc_dis~)
-- *Action*: Set to 1 to disable conversion.
-
-** 13.3 ILI9881C Panel Initialization Fixes
-
-- *Command 0xCF*: Often misidentified as 0xBF in some driver sources. Allwinner's source confirms command 0xCF with data 0x23 is correct for this panel variant.
-- *Reset Sequence*: Standard stable sequence is:
-  1. Pull Reset LOW.
-  2. Enable Power Supplies.
-  3. Wait 20ms.
-  4. Release Reset (HIGH).
-  5. Wait 120ms (stabilization) before sending DCS commands.
-
-** 13.4 VEP (Video Enhancement Processor) Clearing
-
-To ensure a "clean" bootloader display, all VEP unit bases should be written with 0. For NCAT2 Channel 1, these start at 0xF0000 (FCE), 0xF2000 (BWS), 0xF4000 (LTI), 0xF6000 (PEAK), 0xF8000 (ASE).
-
-** 13.5 D-PHY IC Version Quirk (NCAT2)
-
-Register ~0x03000024~ bits 0-2 contain the IC version. If this value is greater than 0, bit 5 of the D-PHY ~ANA1~ register (Offset 0x50) must be set to ensure physical layer stability and correct signal levels.
-
-*Linux driver gap (confirmed 2026-03-14):* On the test board ic_ver=3. Live register read of
-=DPHY_ANA1= (0x05451050) with bus clock enabled showed =0x80000000= — bit 5 is *not set*.
-The mainline =phy-sun6i-mipi-dphy.c= does not implement this IC version check. The display
-operates because the effect is on signal margin rather than hard functionality, but this is
-a latent risk for intermittent stability issues. The fix needs to be applied to the Linux
-PHY driver (mirror what U-Boot's =phy-sun6i-mipi-dphy.c= does for the A100/D1 variant).
-
-** 13.6 Combo PHY Register Hygiene
-
-On NCAT2 (T113-S/D1), the display PHY is a "Combo PHY" supporting both DSI and LVDS. Stale LVDS state in ~COMBO_PHY_REG1~ (Offset 0x114) and ~COMBO_PHY_REG2~ (Offset 0x118) can cause intermittent flickering or sync issues during DSI operation. Explicitly clearing these registers to 0 before DSI configuration is recommended.
-
-*Linux driver gap (confirmed 2026-03-14):* Live register read showed =COMBO_PHY_REG1= = 0x0
-(clean) but =COMBO_PHY_REG2= (0x05451118) = =0x14= (not zeroed). The Linux DSI/PHY driver
-does not clear these registers. If intermittent flickering is observed under Linux, zeroing
-=COMBO_PHY_REG2= in the PHY power-on sequence is the first fix to try.
-
-** 13.7 Explicit Gamma Disable
-
-Even if ~tcon_gamma_en~ is 0, stale or uninitialized gamma tables can intermittently affect display output on some Allwinner SoCs. Explicitly clearing the TCON control register (~0x40~) and disabling the feature during early initialization is required.
-
-* 15. Baseline Register Dumps (Good State)
-
-Recorded on 2026-03-13 while display output was correct. Use these to compare against "Warmish Color" or "No Display" states.
-
-** 15.1 DE2 Mixer 0 (Base: 0x05100000)
-
-| Register | Offset | Value | Description |
-|----------+--------+------------+-------------|
-| GLB_CTL  | 0x0000 | 0x00000001 | Enable bit set |
-| GLB_SIZE | 0x000c | 0x04ff02cf | 720x1280 |
-| BLD_CTL  | 0x1000 | 0x00000100 | Pipe 0 enabled |
-| BLD_ROUT | 0x1080 | 0x00000001 | Channel 1 -> Pipe 0 |
-| BLD_MODE | 0x1090 | 0x03010301 | Standard blend |
-| UI1_ATTR | 0x3000 | 0x00000401 | UI1 enabled, XRGB8888 |
-| UI1_SIZE | 0x3004 | 0x04ff02cf | 720x1280 |
-| UI1_LADD | 0x3010 | 0x4e000000 | Framebuffer address |
-| MUX_CSC  | 0x1b000| 0x00000000 | Mixer CSC disabled |
-
-** 15.2 TCON LCD0 (Base: 0x05461000)
-
-| Register | Offset | Value | Description |
-|----------+--------+------------+-------------|
-| GCTL     | 0x0000 | 0x80000000 | TCON enable |
-| TCON0_CTL| 0x0040 | 0x81070031 | Enable, DSI mode, delay |
-| HV_IF    | 0x0058 | 0x00080000 | CCIR CSC disabled (bit 19) |
-| CPU_IF   | 0x0060 | 0x10000005 | DSI mode, TRI_FIFO_EN, TRI_EN |
-| TRI0     | 0x0160 | 0x01f302cf | Trigger timing 0 |
-| TRI1     | 0x0164 | 0x00d004ff | Trigger timing 1 |
-| TRI2     | 0x0168 | 0x1ada000a | Trigger timing 2 |
-
-** 15.3 DSI Host (Base: 0x05450000)
-
-| Register | Offset | Value | Description |
-|----------+--------+------------+-------------|
-| CTL      | 0x0000 | 0x01010001 | DSI enabled |
-| BASIC_CTL0| 0x0010 | 0x00030001 | ECC/CRC EN, INST_ST running |
-| BASIC_CTL1| 0x0014 | 0x00005157 | Video mode, start delay |
-| JUMP_SEL | 0x0048 | 0x63f07006 | HSD loop |
-
-** 15.4 D-PHY (Base: 0x05451000)
-
-| Register | Offset | Value | Description |
-|----------+--------+------------+-------------|
-| GCTL     | 0x0000 | 0x00000031 | 4 lanes, enabled |
-| ANA0     | 0x004c | 0x00000044 | Analog setting 0 |
-| ANA1     | 0x0050 | 0x80000020 | Bit 5 quirk set (IC ver > 0) |
-| ANA2     | 0x0054 | 0x0f000012 | Analog setting 2 |
-| ANA3     | 0x0058 | ff040000   | Analog setting 3 |
-| PLL_REG0 | 0x0104 | 0x00f78582 | D-PHY PLL enabled |
-
-* 16. Implementation Reference
-
-** 14.1 Source (Linux v6.10 Backport Origin)
-
-- =sun6i_mipi_dsi.c= — DSI controller, register-based, no interrupts.
-- =phy-sun6i-mipi-dphy.c= — D-PHY timing and lane configuration.
-- =sun4i_tcon.c= — TCON LCD with DSI mode support.
-- =sun8i_tcon_top.c= — TCON mux/routing logic.
-- =sun8i_mixer.c= — DE2 mixer/blender configuration.
-- =panel-ilitek-ili9881c.c= — Panel initialization sequences.
-- =sunxi-d1s-t113.dtsi= — DSI node definitions (compatible ="allwinner,sun50i-a100-mipi-dsi"=).
-
-** 14.2 Target (U-Boot v2026.04 Integration)
-
-Existing U-Boot infrastructure utilized or extended:
-- =drivers/video/mipi_dsi.c= — Generic MIPI DSI host framework.
-- =drivers/video/dsi_host-uclass.c= — DSI host DM uclass.
-- =include/mipi_dsi.h= — MIPI DSI structures and APIs.
-- =drivers/video/sunxi/sunxi_de2.c= — DE2 driver (extended for DSI path).
-- =drivers/video/sunxi/lcdc.c= — TCON register programming and TRI timing.
-- =drivers/video/panel-uclass.c= — Panel driver model framework.
-
-* 17. Early Splash via initramfs DRM (drm-splash)
-
-** 17.1 Architecture
-
-The early splash strategy runs a statically linked =drm-splash= binary from the
-initramfs before the root filesystem is mounted. This avoids U-Boot display
-initialization entirely and lets the Linux DRM stack (=sun4i-drm= + =sun6i-dsi=)
-do a clean, uncontested panel init during =device_initcall=.
-
-- U-Boot: =CONFIG_VIDEO= disabled → panel stays cold through kernel boot.
-- Kernel DRM stack initialises panel at ~3.5 s (=device_initcall=).
-- =drm-splash= launches at ~3.75 s, DSI returns connector at ~3.87 s.
-- =drm-splash= calls =drmModeSetCrtc=, then =drmDropMaster= immediately.
-- Waits for SIGTERM (sent by userspace when real compositor starts).
-
-** 17.2 drm-splash Binary
-
-File: =drm-splash/initramfs/build/bin/drm-splash= (855 KB, static ARM).
-
-Behavior:
-1. Open =/dev/dri/card0=.
-2. Find first connected connector and its preferred mode.
-3. Allocate dumb buffer (32 bpp, XRGB8888), mmap, blit BMP/SPLR image.
-4. Call =drmModeSetCrtc=.
-5. Call =drmDropMaster()= immediately so later processes can take DRM master.
-6. Block on =SIGTERM=.
-
-** 17.3 OpenWrt Initramfs Overlay
-
-The existing system uses =openwrt.cpio.gz= as the kernel-embedded initramfs.
-Rather than replacing it, the overlay is concatenated as a second cpio stream:
+** 13.4 Initramfs Overlay Technique
 
 #+begin_src bash
 (zcat openwrt.cpio.gz; cat overlay.cpio) | gzip -9 > combined.cpio.gz
 #+end_src
 
-The kernel's =init/initramfs.c= processes concatenated cpio streams in order;
-later entries override earlier ones. The overlay contributes three files:
-- =/init= — modified (adds devtmpfs mount + drm-splash launch)
-- =/bin/drm-splash= — the static binary
-- =/splash.bmp= — the splash image
+Kernel processes concatenated cpio streams in order; later entries override earlier.
+Embedding combined (~4.9 MB) via =CONFIG_INITRAMFS_SOURCE= produces a ~13 MB =zImage=
+that fails to boot — keep initramfs external or use the FAT hook instead.
 
-** 17.4 Critical: devtmpfs Must Be Mounted Explicitly
+** 13.5 FAT Hook Deployment (No Kernel Rebuild)
 
-=auot_dev= in the OpenWrt initramfs mounts =proc=, =sysfs=, and =tmpfs= but NOT
-=devtmpfs= at =/dev=. Without it, =/dev/dri/card0= never appears.
+The OpenWrt =/init= mounts =mmcblk0p4= (FAT) and =exec='s =/media/boot/init.sh= if
+its MD5 matches =md5.txt=. Use to inject drm-splash without a kernel rebuild:
+1. Copy =drm-splash= binary and =splash.bmp= to FAT partition.
+2. Write =init.sh=: mount devtmpfs, poll =/dev/dri/card0=, launch drm-splash, exec =/sbin/init=.
+3. Write =md5.txt= of =init.sh=.
 
-The overlay =/init= must add before the drm-splash wait loop:
-
-#+begin_src sh
-mount -t devtmpfs devtmpfs /dev
-#+end_src
-
-** 17.5 gen_initramfs.sh Limitation
-
-This kernel version's =usr/gen_initramfs.sh= treats ALL regular files in
-=CONFIG_INITRAMFS_SOURCE= as text filelists. The only fast-paths are a single
-=.cpio= or =.cpio.gz= source (handled directly by =usr/Makefile=).
-
-Space-separated multi-source values in =CONFIG_INITRAMFS_SOURCE= do not work.
-Pre-merging into a single =.cpio.gz= (as above) is the correct approach.
-
-** 17.6 zImage Size Warning
-
-Embedding the combined initramfs (~4.9 MB) in the kernel via
-=CONFIG_INITRAMFS_SOURCE= produces a ~13 MB =zImage= that fails to boot
-(U-Boot shows "Starting kernel..." but kernel produces no output).
-
-*Root cause*: The kernel decompresses and re-packs the cpio during build,
-inflating the =zImage= to the point where it exceeds boot constraints.
-
-*Recovery*: Revert =CONFIG_INITRAMFS_SOURCE= to original =openwrt.cpio.gz=
-only and rebuild the kernel.
-
-** 17.7 Recommended Deployment: FAT Hook (No Kernel Rebuild)
-
-The OpenWrt =/init= script on the deployed kernel already implements a FAT hook:
-it mounts =mmcblk0p4= (FAT), checks =/media/boot/init.sh= + =md5.txt=, and
-=exec='s the script if the MD5 matches.
-
-This mechanism allows injecting drm-splash without any kernel rebuild:
-
-1. Write an =init.sh= to the FAT partition that:
-   - Mounts devtmpfs
-   - Waits for =/dev/dri/card0=
-   - Launches =drm-splash= in background
-   - =exec='s =/sbin/init= to continue normal boot
-2. Copy =drm-splash= binary and =splash.bmp= to the FAT partition.
-3. Write the =md5.txt= of =init.sh=.
-
-No kernel rebuild required; changes are confined to the FAT partition.
-
-** 17.8 Busybox Sleep Limitation
-
-OpenWrt busybox =sleep= only accepts integer seconds. =sleep 0.1= causes:
-
-  =sh: sleep: invalid number '0.1'=
-
-Use =sleep 1= with a counter loop instead.
-
-* 18. EK79007 Panel Driver (U-Boot Backport)
-
-** 18.1 Driver Files
-- =u-boot/drivers/video/panel-elitek-ek79007.c= — new driver backported from Linux.
-- =u-boot/drivers/video/Kconfig= — added =CONFIG_VIDEO_LCD_EK79007= entry.
-- =u-boot/drivers/video/Makefile= — added =obj-$(CONFIG_VIDEO_LCD_EK79007)= rule.
-- =u-boot/configs/raft-gw-argon-vb_defconfig= — =CONFIG_VIDEO_LCD_EK79007=y= added.
-- DTS already had the =panel@0= node under =&dsi= with =compatible = "elitek,ek79007"=.
-
-** 18.2 Panel Specification
-| Parameter    | Value                                                       |
-|--------------+-------------------------------------------------------------|
-| Resolution   | 1024 × 600                                                  |
-| Pixel clock  | 51.2 MHz                                                    |
-| HFP/HBP/HSA  | 160 / 160 / 10                                              |
-| VFP/VBP/VSA  | 12 / 23 / 1                                                 |
-| DSI lanes    | 4                                                           |
-| DSI format   | RGB888                                                      |
-| Mode flags   | VIDEO | VIDEO_SYNC_PULSE | CLOCK_NON_CONTINUOUS | LPM        |
-| Physical     | 154 mm × 86 mm                                              |
-
-** 18.3 Clock Chain (Correct — Verified from Boot Log)
-#+begin_example
-pixel_clk = 51.2 MHz
-dsi_bit_clk = 51.2 × 24 / 4 = 307.2 MHz
-PLL_4X target = 307.2 × 4 = 1228.8 MHz
-PLL_4X actual = 24 × 51 / 1 = 1224 MHz  (n=51, m=1; 0.4% off — PLL M-bit limit)
-TCON_DIV = 4 → TCON clock = 306 MHz = DSI bit rate
-#+end_example
-
-Clock is derived automatically from =pixelclock= in =display_timing=. No manual tuning needed.
-The 0.4% error is within tolerance and is the same resolution limit as all other panels.
-
-** 18.4 Reset GPIO Convention (Same as ILI9881C)
-- DTS: =reset-gpios = <&pio 4 1 GPIO_ACTIVE_LOW>= (PE1, active-low signal).
-- =dm_gpio_set_value(reset, 0)= → physical HIGH → panel running.
-- =dm_gpio_set_value(reset, 1)= → physical LOW  → panel in reset.
-- Sequence used: assert (1) → 15 ms → release (0) → 120 ms → send commands.
-- This matches ILI9881C driver convention on this hardware.
-
-** 18.5 DSI LP Command Log (Verified Correct)
-Commands are transmitted in LP mode as DCS SHORT WRITE (type=0x15 for 2-byte, 0x05 for 1-byte).
-All 9 commands verified in boot log:
-#+begin_example
-0x80=0xAC  0x81=0xB8  0x82=0x09  0x83=0x78
-0x84=0x7F  0x85=0xBB  0x86=0x70
-0x11 (exit_sleep, +120ms)
-0x29 (set_display_on)
-#+end_example
-
-*DSI command logging*: All =printf()= debug calls across the display pipeline have been
-converted to =log_debug()= (=<log.h>=). Silent by default; enabled by =#define DEBUG= or
-by setting =CONFIG_LOG_DEFAULT_LEVEL= in the board configuration.
-
-** 18.6 Display Verified Working [2026-03-18]
-EK79007 panel confirmed working on hardware with U-Boot splash screen.
-Full pipeline (DE2 1024×600 → TCON LCD0 → DSI → EK79007) initialises and displays correctly.
-
-*Next step*: Enable Linux =sun6i-dsi= / =sun4i-drm= debug log, compare register dump
-vs U-Boot to find the divergence.
+Busybox =sleep= accepts integer seconds only (=sleep 0.1= fails — use counter loop).
+=devtmpfs= must be mounted explicitly; OpenWrt =auot_dev= does not mount it.

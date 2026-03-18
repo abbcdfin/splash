@@ -44,3 +44,5 @@ When building u-boot and linux, I prefer out-of-tree build in subdirectories ins
 
 * Work Flow
 Please wait for my instructions when you are ready.
+
+Feel free to ask me questions if there is any requirement not clear enough.
