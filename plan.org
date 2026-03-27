@@ -23,15 +23,13 @@ Pipeline: DE2 Mixer → TCON Top → TCON LCD0 → DSI Controller → D-PHY → 
 - Integrated full display pipeline (Mixer0 → TCON Top → TCON LCD0 → DSI → Panel) into board DTS.
 - Enabled =CONFIG_VIDEO=, =CONFIG_VIDEO_DE2=, and splash screen support in board defconfig.
 
-* Phase 4: Integration and Refinement [DONE]
-Deep-dive comparison against Allwinner brandy-2.0 BSP identified and fixed all colour
-fidelity issues in the U-Boot display pipeline: corrected =CCSC01= offset (=0xFA050=),
+* Phase 4: Solving potential display issue [DONE]
+Deep-dive comparison against Allwinner brandy-2.0 BSP identified and fixed all discrepencies in the U-Boot display pipeline: corrected =CCSC01= offset (=0xFA050=),
 disabled TCON CCIR CSC (=HV_IF_REG= bit 19), fixed ILI9881C command =0xCF=, cleared
 DCSC/SMBL/VEP units, applied D-PHY =ANA1= bit-5 IC-version quirk, and zeroed stale
 Combo PHY registers. Display verified correct on hardware for both ILI9881C and EK79007.
-Two Linux divergences noted in =knowledge.org= §17 for Phase 7.
 
-* Phase 5: Early Splash via initramfs DRM
+* Phase 5: Early Splash via initramfs DRM [PAUSED]
 Strategy change: U-Boot does not initialize the display. Panel stays cold through kernel
 boot. The DRM stack (sun4i-drm + sun6i-dsi) does a clean, uncontested panel init during
 kernel =device_initcall=. A statically linked =drm-splash= binary runs from initramfs
@@ -91,14 +89,18 @@ Use the OpenWrt FAT hook mechanism to inject drm-splash without any kernel rebui
   background, then =exec='s =/sbin/init= to continue normal boot.
 - This requires no kernel rebuild and no changes to the deployed initramfs.
 
+
 * Phase 6: EK79007 Panel Support in U-Boot [DONE]
 Backported =panel-elitek-ek79007.c= (1024×600, 4-lane, 51.2 MHz pixel clock) and verified
 on hardware. Reset convention and clock derivation match ILI9881C. All pipeline debug
 =printf= calls converted to =log_debug()= across all display drivers.
 
-* Phase 7: Linux Kernel Display Fidelity [TODO]
-Port the display fidelity fixes from U-Boot into the Linux =sun4i-drm= / =sun6i-dsi=
-driver stack so the panel renders correctly under Linux.
+* Phase 7: Linux Kernel Display Fidelity [IN-PROGRESS]
+Symptom: Device starts with u-boot, displays splash image (gradient.bmp) on LCD screen, then load Linux kernel. Once the system is up, drm-splash service displays the same bmp file onto the LCD screen. When perform cold start, sometime Linux service shows vertical colour-banded stripes on the ILI9881C panel; U-Boot
+displays the same panel correctly.
 
-Symptom: Linux shows vertical colour-banded stripes on the ILI9881C panel; U-Boot
-displays the same panel correctly after Phase 4 fixes.
+One thing to be noted is that this is not permnant. When boot from a cold start, some cases, Linux displayed the image correctly, but sometimes not. In the case it started display incorrectly or correctly, it almost always stays the same way after software reboot reboot. Power off the linux box and wait for more than one minute seems always put the system into good state, while quick power cycle in seconds usually put the system into bad state.
+
+In the case Linux display incorrectly, u-boot always display the image correct.
+
+I suspect that some DE features rely on control registers which will be properly reset by long power down but won't by quick power cycle. However, u-boot does not rely on those features, so u-boot can display the image correctly. Once they are enabled in Linux, as those registers has wrong value, the display becomes incorrect.

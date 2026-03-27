@@ -9,8 +9,8 @@ The specification of this project is in ./README.org.
 
 * Plan
 Please use ./plan.org as the interactive design board. This can be used as a highlevel plan for later work. Each phase of the plan should be verifiable so can be properly completed.
-- Just-In-Time (JIT) Planning: For each phase, please concisely list the granular just-in-time plan before proceeding. Do not detail future phases until the current one is done.
-- Summarize and Collapse: Once the phase finished, please replace the JIT plan with a concise summary which might help the future phase. No granular tactical information needs to be kept for the completed phases.
+- Just-In-Time (JIT) Planning: For each phase, please concisely list the granular just-in-time plan before proceeding. Do not detail future phases until the current one is done. Please use phase*_plan.org or your own internal planning mechanism, the JIT plan should not be included in the plan.org.
+- Summarize and Collapse: Once the phase finished, please update plan.org with a concise summary which might help the future phase. No granular tactical information needs to be kept for the completed phases.
 
 * Checkpoint
 Checkpoint will be used to track the progress of the development. Use ./checkpoint.org strictly as your volatile short-term memory and session handoff file.
@@ -35,14 +35,9 @@ Update ./knowledge.org when you:
 - No placeholders: Write complete, compilable code only.
 
 * Work Environment
-The work space of this project is /home/jian/Download/splash.
-When building u-boot and linux, I prefer out-of-tree build in subdirectories inside ~/Downloads which is mounted with tmpfs.
-- Cross-Compilation: This is a embedded software project. Please source /home/jian/.scripts/setup-oe.sh, it will setup the bash environment for cross compiling.
-- Target Board: The target board is a embedded linux box named raft-gw-argon-vb, use can use this name to find the defconfig for both u-boot and linux.
-- Hardware Access: The target's serial console is connected to /dev/ttyUSB0 with baudrate 115200. And its ethernet is connected to dhcp server and usually can get ip address 192.168.13.100. You can access the target using root as username and " " (a single space) as password.
-- Please make build directory in ~/Download and use rmake function provided in ~/.scripts/setup-oe.sh to do out-of-tree build.
+Please get familiar with the work environment with ./env.md.
 
 * Work Flow
-Please wait for my instructions when you are ready.
+Please wait for my instructions for next step.
 
 Feel free to ask me questions if there is any requirement not clear enough.
