@@ -353,9 +353,61 @@ If flickering occurs under Linux, zeroing this register is the first fix to try.
 | ANA3           | 0x058  | 0xff040000 |                                 |
 | PLL_REG0       | 0x104  | 0x00f78582 | D-PHY PLL enabled               |
 | COMBO_PHY_REG1 | 0x114  | 0x00000000 | Must be cleared                 |
-| COMBO_PHY_REG2 | 0x118  | 0x00000000 | Must be cleared (Linux leaves 0x14) |
+| COMBO_PHY_REG2 | 0x118  | 0x00000014 | HS_STOP_DLY(20), matches Linux      |
 
-* 7. Panels
+* 7. U-Boot vs Linux Pipeline Comparison
+
+** 7.1 TCON Differences
+
+| Feature              | Linux                                      | U-Boot              |
+|----------------------+--------------------------------------------+---------------------|
+| Dithering (FRM)      | Writes 6 seed + 4 table regs; enables      | Not touched         |
+|                      | FRM_CTL_EN if panel is 6bpc                |                     |
+| ECC FIFO             | SUN4I_TCON_ECC_FIFO_EN written             | Not written         |
+| SAFE_PERIOD          | NUM(3000) \vert MODE(3)                    | Not written         |
+| IO_TRI               | 0xe0000000                                 | Not written         |
+| CCIR CSC (HV_IF b19) | Set (disables YCbCr CSC)                   | Set (Phase 4 fix)   |
+
+** 7.2 DSI Controller
+
+Init sequences are functionally identical — same registers, same values, same ordering.
+No meaningful difference found.
+
+** 7.3 D-PHY Differences
+
+| Feature              | Linux                                      | U-Boot              |
+|----------------------+--------------------------------------------+---------------------|
+| ANA1 bit 5 (IC-ver)  | Not set (gap, patched in Phase 5)          | Set when ic_ver > 0 |
+| COMBO_PHY_REG2       | HS_STOP_DLY(20) = 0x14                     | 0x14 (aligned)      |
+| Power-down sequence  | Full teardown: GCTL=0, ANA0-4=0           | No explicit teardown|
+
+** 7.4 DE2 Mixer Differences
+
+| Feature              | Linux                                      | U-Boot              |
+|----------------------+--------------------------------------------+---------------------|
+| Bulk zero 0x0-0x5FFC | Yes (loop in sun8i_mixer_bind)             | Yes (memset)        |
+| VEP disable          | Enable regs at 0xA0000-0xA8000             | Zeroes 0xF0000-0xF8000 (different offsets!) |
+| FCC                  | Disables at 0xAA000                        | Not touched         |
+| DCSC                 | Disables at 0xB0000                        | Zeroes at 0xB0000   |
+| SMBL (0x60000)       | Not touched at all                         | Zeroes at 0x60000   |
+| CCSC (per-layer CSC) | Enabled/configured per-layer during commit | Not used            |
+| UI scaler            | sun8i_ui_scaler module                     | Not used            |
+| VI scaler            | sun8i_vi_scaler module                     | Not used            |
+
+*** VEP offset discrepancy ⚠️
+U-Boot clears VEP at 0xF0000-0xF8000, Linux disables at 0xA0000-0xA8000.
+These may be different blocks or NCAT2-specific remapping — needs verification.
+
+*** CCSC stale state risk ⚠️
+Linux enables CCSC per-layer during atomic commits but does not clear CCSC enable bits
+during mixer bind. Stale CCSC enable bits from a previous Linux session could persist
+across soft reboot and apply an unwanted color matrix.
+
+** 7.5 Panel (ILI9881C)
+
+Both send the same DCS command sequence. The prepare/enable flow is equivalent.
+
+* 8. Panels
 
 ** 7.1 ILI9881C — hd50004c30 (720×1280)
 

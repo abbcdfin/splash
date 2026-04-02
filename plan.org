@@ -29,78 +29,31 @@ disabled TCON CCIR CSC (=HV_IF_REG= bit 19), fixed ILI9881C command =0xCF=, clea
 DCSC/SMBL/VEP units, applied D-PHY =ANA1= bit-5 IC-version quirk, and zeroed stale
 Combo PHY registers. Display verified correct on hardware for both ILI9881C and EK79007.
 
-* Phase 5: Early Splash via initramfs DRM [PAUSED]
-Strategy change: U-Boot does not initialize the display. Panel stays cold through kernel
-boot. The DRM stack (sun4i-drm + sun6i-dsi) does a clean, uncontested panel init during
-kernel =device_initcall=. A statically linked =drm-splash= binary runs from initramfs
-immediately after =/dev/dri/card0= is available, showing the splash image before rootfs
-is mounted. Expected time to first image: ~3 seconds.
+* Phase 5: Linux Kernel Display Issue [Progressing]
+Symptom: start the device with linux, display gradient.bmp on LCD via MIPI DSI interface. 9 out of 10 times, it displays the image correctly, as showing in ./debug/captures/c.jpg. Sometimes, it displays the image incorrectly, as showing in ./debug/captures/e0.jpg.
 
-** 5.1 simplefb framebuffer handoff [CANCELLED]
-Cancelled: U-Boot no longer initializes the display, so there is no live framebuffer to
-hand off. =CONFIG_VIDEO=, =CONFIG_VIDEO_DT_SIMPLEFB=, and the DTS =framebuffer-lcd0= stub
-are all removed/disabled.
+Observations:
++ The symptom stays after soft reboot. When soft reboot via linux terminal, if the display was incorrect before reboot, it will display incorrectly after reboot as well. Vice versa;
++ The symptom won't stay after power cycle;
++ Enabling MIPI DSI splash in U-Boot makes the Linux display failure more frequent after handover;
++ U-Boot itself always displays correctly, even after a soft reboot;
 
-** 5.2 Skip panel reset on first boot [CANCELLED]
-Cancelled: panel-skip-init is only needed when U-Boot leaves the panel in an initialized
-state. With a cold panel, the DRM driver performs a clean first-time init with no conflict.
+Analysis:
++ D-PHY/DSI hardware state is not the root cause — U-Boot proves the link layer resets cleanly on soft reboot;
++ U-Boot uses a minimal subset of the display framework; Linux enables additional units (e.g., CSC, enhancement blocks) that U-Boot never touches;
++ After a soft reboot, these extra units may retain stale state from the previous Linux session, and Linux may not fully reinitialize them assuming clean power-on defaults;
++ Race conditions in Linux's multi-subsystem init sequence (PHY, DSI, TCON, DE2, panel) remain a possible cause, though less likely since the symptom persists across soft reboots;
++ Primary investigation should focus on what Linux enables that U-Boot does not, and whether Linux properly resets those units during probe;
 
-** 5.3 Framebuffer console [PAUSED]
-Paused: not needed for the current goal. May be revisited if kernel text console output
-on the LCD is desired.
+Failure pattern:
++ Single failure mode: vertical banding / color channel separation (see =./debug/captures/incorrect0.jpg= and =incorrect1.jpg=);
++ The number of bands and colors vary between occurrences, suggesting a timing-dependent element (e.g., DSI lane skew or D-PHY PLL phase varying per boot);
 
-** 5.4 initramfs drm-splash [DONE]
-Show splash image from initramfs via DRM, before rootfs is mounted.
-- [X] Implement statically linked =drm-splash= binary (855 KB, ARM static).
-      Opens =/dev/dri/card0=, allocates dumb buffer (XRGB8888), calls
-      =drmModeSetCrtc=, drops DRM master (=drmDropMaster=), waits for SIGTERM.
-      Supports BMP and SPLR image formats.
-- [X] Build overlay for existing OpenWrt initramfs (=openwrt.cpio.gz=) using
-      concatenated cpio technique: =(zcat openwrt.cpio.gz; cat overlay.cpio) | gzip=.
-      Kernel's =init/initramfs.c= processes concatenated streams; later entries
-      override earlier ones. Overlay adds: =/init= (modified), =/bin/drm-splash=,
-      =/splash.bmp=.
-- [X] Modified =/init= adds =mount -t devtmpfs devtmpfs /dev= before the
-      drm-splash wait loop (=auot_dev= in OpenWrt does not mount devtmpfs).
-      Polls for =/dev/dri/card0= up to 5 s, then launches drm-splash in background.
-      All existing OpenWrt preinit and FAT-hook logic is preserved unchanged.
-- [X] Verified drm-splash launches at ~3.75 s, DSI initialises at ~3.87 s,
-      process reaches "displaying /splash.bmp, waiting for SIGTERM" state.
+Dmesg analysis (7 captures in =./debug/147048/=: 4 incorrect, 3 correct):
++ Linux display pipeline init sequence is identical across all correct and incorrect boots — same messages, same probe order, zero errors or warnings;
++ Regulator probe ordering varies due to async scheduling but does NOT correlate with display correctness;
++ Soft reboot vs power-cycle shows no kernel-side init difference;
++ Conclusion: the problem is entirely pre-kernel — the display outcome is determined by hardware state before Linux starts, not by how Linux initializes the pipeline;
 
-*** Key learnings
-- =gen_initramfs.sh= in this kernel treats all regular files as text filelists;
-  multi-source =CONFIG_INITRAMFS_SOURCE= does not work. Pre-merge into a single
-  =.cpio.gz= is the correct approach.
-- Embedding the combined initramfs (4.9 MB) in the kernel produces a ~13 MB zImage
-  that failed to boot. Recovery: revert =CONFIG_INITRAMFS_SOURCE= to original
-  =openwrt.cpio.gz= only and rebuild kernel. Device recovered (2026-03-14).
-- =sleep 0.1= not available in OpenWrt busybox; use integer seconds only.
-
-*** Current status
-The kernel embeds only the original =openwrt.cpio.gz=. The drm-splash overlay
-is built but not yet active in the deployed kernel.
-
-*** Recommended next approach
-Use the OpenWrt FAT hook mechanism to inject drm-splash without any kernel rebuild:
-- Place =init.sh= + =md5.txt= on the FAT partition (mmcblk0p4).
-- The existing =/init= in openwrt.cpio.gz mounts mmcblk0p4, checks the MD5, and
-  =exec='s =/init.sh= if valid.
-- =init.sh= mounts devtmpfs, waits for =/dev/dri/card0=, launches drm-splash in
-  background, then =exec='s =/sbin/init= to continue normal boot.
-- This requires no kernel rebuild and no changes to the deployed initramfs.
-
-
-* Phase 6: EK79007 Panel Support in U-Boot [DONE]
-Backported =panel-elitek-ek79007.c= (1024×600, 4-lane, 51.2 MHz pixel clock) and verified
-on hardware. Reset convention and clock derivation match ILI9881C. All pipeline debug
-=printf= calls converted to =log_debug()= across all display drivers.
-
-* Phase 7: Linux Kernel Display Fidelity [IN-PROGRESS]
-Symptom: Device starts with u-boot, displays splash image (gradient.bmp) on LCD screen, then load Linux kernel. Once the system is up, drm-splash service displays the same bmp file onto the LCD screen. When perform cold start, sometime Linux service shows vertical colour-banded stripes on the ILI9881C panel; U-Boot
-displays the same panel correctly.
-
-One thing to be noted is that this is not permnant. When boot from a cold start, some cases, Linux displayed the image correctly, but sometimes not. In the case it started display incorrectly or correctly, it almost always stays the same way after software reboot reboot. Power off the linux box and wait for more than one minute seems always put the system into good state, while quick power cycle in seconds usually put the system into bad state.
-
-In the case Linux display incorrectly, u-boot always display the image correct.
-
-I suspect that some DE features rely on control registers which will be properly reset by long power down but won't by quick power cycle. However, u-boot does not rely on those features, so u-boot can display the image correctly. Once they are enabled in Linux, as those registers has wrong value, the display becomes incorrect.
+** Known issue: DRM aggregate teardown memory corruption
+When unbinding the =sun6i-mipi-dsi= platform driver, =component_del= triggers =sun4i_drv_unbind= which tears down the entire DRM device. =drm_fbdev_dma_setup= was called during bind, meaning the kernel fbcon (framebuffer console) is an active consumer. During =drm_dev_unregister=, the fbdev is removed, but fbcon may race with the teardown — it is a kernel-internal consumer unaffected by killing userspace processes. This was observed as a NULL =vm_mm= crash in an unrelated =sshd= process (NULL deref at offset 0x58 in =down_write= from =vma_prepare=, with unsymbolized return address on stack indicating slab/memory corruption). The crash is non-deterministic and may not reproduce on every unbind cycle. Low priority — only affects the unbind/rebind debug workflow, not normal operation.
