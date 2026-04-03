@@ -30,30 +30,24 @@ DCSC/SMBL/VEP units, applied D-PHY =ANA1= bit-5 IC-version quirk, and zeroed sta
 Combo PHY registers. Display verified correct on hardware for both ILI9881C and EK79007.
 
 * Phase 5: Linux Kernel Display Issue [Progressing]
-Symptom: start the device with linux, display gradient.bmp on LCD via MIPI DSI interface. 9 out of 10 times, it displays the image correctly, as showing in ./debug/captures/c.jpg. Sometimes, it displays the image incorrectly, as showing in ./debug/captures/e0.jpg.
+Symptom: start the device with linux, display gradient.bmp on LCD via MIPI DSI interface. 9 out of 10 times, it displays the image correctly, as showing in ./debug/captures/c.jpg. Sometimes, it displays the image incorrectly, as showing in ./debug/captures/e0.jpg. To be noted that the resolution of this screen is 720x1280, so actually the error pattern is horizental banding .
 
 Observations:
 + The symptom stays after soft reboot. When soft reboot via linux terminal, if the display was incorrect before reboot, it will display incorrectly after reboot as well. Vice versa;
-+ The symptom won't stay after power cycle;
++ The symptom usually won't stay after power cycle;
 + Enabling MIPI DSI splash in U-Boot makes the Linux display failure more frequent after handover;
 + U-Boot itself always displays correctly, even after a soft reboot;
-
-Analysis:
-+ D-PHY/DSI hardware state is not the root cause — U-Boot proves the link layer resets cleanly on soft reboot;
-+ U-Boot uses a minimal subset of the display framework; Linux enables additional units (e.g., CSC, enhancement blocks) that U-Boot never touches;
-+ After a soft reboot, these extra units may retain stale state from the previous Linux session, and Linux may not fully reinitialize them assuming clean power-on defaults;
-+ Race conditions in Linux's multi-subsystem init sequence (PHY, DSI, TCON, DE2, panel) remain a possible cause, though less likely since the symptom persists across soft reboots;
-+ Primary investigation should focus on what Linux enables that U-Boot does not, and whether Linux properly resets those units during probe;
++ unbind and bind DSI device in linux won't fix the issue;
++ when black image got displayed incorrectly, the whole screen has a dark blue color. It is the same when application stop displaying image on screen;
++ when using modetest to show the test pattern, it seems correct. So, it doesn't looks like there is a const pattern added to the image, more like some sort of conversion are enabled;
++ unbind DSI device leaves the screen in normal blank state;
++ Both ./resources/solid_1f1f1f.bmp and ./resources/solid_5f5f5f.bmp are displayed when the system display in incorrect state. solid_1f1f1f.bmp displayed with a blue color 
+ yet solic_5f5f5f.bmp displayed correctly. I strongly feel that the problem is in pixel conversion, in which case, some pixel with specific data (or like in a range) got 
+ converted to different color and show incorrectly. 
 
 Failure pattern:
-+ Single failure mode: vertical banding / color channel separation (see =./debug/captures/incorrect0.jpg= and =incorrect1.jpg=);
++ Single failure mode: horizontal banding (see =./debug/captures/incorrect0.jpg= and =incorrect1.jpg=);
 + The number of bands and colors vary between occurrences, suggesting a timing-dependent element (e.g., DSI lane skew or D-PHY PLL phase varying per boot);
-
-Dmesg analysis (7 captures in =./debug/147048/=: 4 incorrect, 3 correct):
-+ Linux display pipeline init sequence is identical across all correct and incorrect boots — same messages, same probe order, zero errors or warnings;
-+ Regulator probe ordering varies due to async scheduling but does NOT correlate with display correctness;
-+ Soft reboot vs power-cycle shows no kernel-side init difference;
-+ Conclusion: the problem is entirely pre-kernel — the display outcome is determined by hardware state before Linux starts, not by how Linux initializes the pipeline;
 
 ** Known issue: DRM aggregate teardown memory corruption
 When unbinding the =sun6i-mipi-dsi= platform driver, =component_del= triggers =sun4i_drv_unbind= which tears down the entire DRM device. =drm_fbdev_dma_setup= was called during bind, meaning the kernel fbcon (framebuffer console) is an active consumer. During =drm_dev_unregister=, the fbdev is removed, but fbcon may race with the teardown — it is a kernel-internal consumer unaffected by killing userspace processes. This was observed as a NULL =vm_mm= crash in an unrelated =sshd= process (NULL deref at offset 0x58 in =down_write= from =vma_prepare=, with unsymbolized return address on stack indicating slab/memory corruption). The crash is non-deterministic and may not reproduce on every unbind cycle. Low priority — only affects the unbind/rebind debug workflow, not normal operation.

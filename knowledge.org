@@ -357,7 +357,48 @@ If flickering occurs under Linux, zeroing this register is the first fix to try.
 
 * 7. U-Boot vs Linux Pipeline Comparison
 
-** 7.1 TCON Differences
+** 7.1 Pipeline Init Ordering (Critical Difference)
+
+U-Boot (sunxi_lcd.c) — sequential, single-threaded:
+#+begin_example
+1. DE2 mixer configured with framebuffer data
+2. TCON mode set:  TRI_EN + TRI_FIFO_EN  (no flush yet)
+3. lcdc_enable:    TCON globally enabled
+4. lcdc_enable:    TRI_FIFO_FLUSH pulse   ← flush AFTER TCON enable
+5. DSI init + D-PHY init                  (~few ms)
+6. Panel LP commands                      (~50 ms)
+7. HSC → 1 ms → HSD
+#+end_example
+
+Linux DRM (drm_atomic_helper_commit_tail_rpm):
+#+begin_example
+1. mode_set_nofb:           TCON configured + TRI_FIFO_FLUSH + TRI_EN + TRI_FIFO_EN
+                            ← flush SIMULTANEOUS with TRI_EN, BEFORE TCON enable
+2. crtc_atomic_enable:      TCON globally enabled → TRI engine starts pushing frames
+   ┌── ~100-200 ms gap ──  TCON running, TRI FIFO filling, no consumer ────────────┐
+3. encoder_enable:          DSI registers + D-PHY + panel LP commands + HSC → HSD   │
+   └────────────────────────────────────────────────────────────────────────────────┘
+4. commit_planes:           DE2 mixer planes configured (AFTER pipeline is live!)
+#+end_example
+
+Key differences:
+- U-Boot configures mixer BEFORE pipeline starts; Linux configures planes AFTER.
+- U-Boot flushes TRI FIFO AFTER TCON enable; Linux flushes BEFORE (then ~100-200 ms
+  of TRI data accumulates before DSI reads it).
+- Both share the same TCON-before-DSI ordering, so ordering alone does not explain
+  the Linux-only failure.
+
+** 7.2 Reset Control Handling
+
+| Component | Linux                              | U-Boot                  | Notes                              |
+|-----------+------------------------------------+-------------------------+------------------------------------|
+| TCON LCD0 | =reset_control_reset= (exclusive)  | =reset_deassert= only   | Linux does proper assert→deassert  |
+| DSI Host  | =reset_control_get_shared=         | =reset_deassert= only   | Shared! See §9.5                   |
+| D-PHY     | =reset_control_deassert= in init   | =reset_deassert= only   | Same shared line as DSI (0xb4c)    |
+| DE2 Mixer | =reset_control_get= (exclusive)    | =reset_deassert= only   | assert in unbind, deassert in bind |
+| TCON TOP  | =reset_control_get= (exclusive)    | N/A                     | Component: assert in unbind        |
+
+** 7.3 TCON Differences
 
 | Feature              | Linux                                      | U-Boot              |
 |----------------------+--------------------------------------------+---------------------|
@@ -550,8 +591,31 @@ Subsequent blank/unblank cycles perform full re-initialization.
 | D-PHY ANA1 bit 5         | Set if ic_ver > 0   | Not implemented                | Reduced signal margin    |
 | COMBO_PHY_REG2           | Cleared to 0        | Left at 0x14                   | Intermittent flicker     |
 
-Root cause of Linux vertical stripes: unconfirmed — pending runtime dmesg comparison
-against the baseline register state in §10.
+Root cause of Linux vertical banding: unconfirmed — see plan.org Phase 5.
+
+** 9.5 Shared Reset Line Problem (DSI + D-PHY)
+
+Both DSI (0x5450000) and D-PHY (0x5451000) share the *same* CCU reset line
+=RST_BUS_MIPI_DSI= at CCU 0xb4c BIT(16). Both drivers use =devm_reset_control_get_shared=.
+
+Consequence: =reset_control_deassert= in =encoder_enable= is a *no-op* when the reset
+line is already deasserted (e.g., after U-Boot splash or warm reboot). The DSI controller
+is never properly hardware-reset. However, direct CCU register toggling to force a reset
+was tested and did *not* resolve the display issue — ruling out stale DSI register state
+as the sole cause.
+
+** 9.6 DRM Atomic Commit Order (commit_tail_rpm)
+
+sun4i uses =drm_atomic_helper_commit_tail_rpm=:
+#+begin_example
+1. commit_modeset_disables  →  disable_outputs + crtc_set_mode (mode_set_nofb here)
+2. commit_modeset_enables   →  crtc_atomic_enable then encoder_enable
+3. commit_planes            →  plane atomic_update (DE2 mixer configured here)
+#+end_example
+
+Planes are configured AFTER the pipeline is fully running. Between step 2 and 3, the
+TCON reads from a mixer with no enabled planes (outputs background colour = black).
+The non-rpm variant =drm_atomic_helper_commit_tail= puts planes BEFORE enables.
 
 * 10. Baseline Register State (ILI9881C 720×1280, Verified Good)
 
