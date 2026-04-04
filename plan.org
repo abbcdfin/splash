@@ -49,5 +49,64 @@ Failure pattern:
 + Single failure mode: horizontal banding (see =./debug/captures/incorrect0.jpg= and =incorrect1.jpg=);
 + The number of bands and colors vary between occurrences, suggesting a timing-dependent element (e.g., DSI lane skew or D-PHY PLL phase varying per boot);
 
+** Findings (2026-04-04)
+
+*** Blue channel 6-bit quantization
+The user identified that the incorrect display shows the blue channel interpreted as 6 bits
+instead of 8 bits, while red and green are correct. Verified with gradient_blue.bmp:
+- Correct: smooth gradient (see =./debug/captures/blue.gradient.correct.jpg=)
+- Incorrect: visible stair-step banding (see =./debug/captures/blue.gradient.incorrect.jpg=)
+
+*** Register dumps are identical between correct and incorrect boots
+Comprehensive register dumps covering the full pipeline (CCU, DE2 Global/Blender/UI1/VI0,
+TCON TOP/LCD0 full 0x200 range, DSI 0x200 range, D-PHY 0x120 range, VEP/FCC/DCSC/CCSC01)
+show NO differences between correct and incorrect Linux boots.
+
+Tools created:
+- U-Boot: =dispdump= command (=u-boot/cmd/sunxi_disp_dump.c=)
+- Linux: =utils/dump_display_regs.sh= (shell script using devmem2)
+- Kernel: commit =51d35125e= (in-kernel PRE-INIT dump in =sun6i_mipi_dsi.c=)
+
+Dumps collected in =./debug/147048.extensive.dump/=.
+
+*** Reset cycle patch (did not fix)
+Added =reset_control_assert()= before =reset_control_deassert()= for DE2 mixer
+(=sun8i_mixer.c=) and TCON_TOP (=sun8i_tcon_top.c=). This did NOT fix the issue,
+ruling out residual internal FIFO/state-machine state from U-Boot as the cause.
+
+*** U-Boot vs Linux TCON register differences
+Comparing U-Boot post-display and Linux post-display dumps reveals significant TCON
+configuration differences:
+
+| Register (TCON offset) | U-Boot         | Linux          | Notes                              |
+|------------------------+----------------+----------------+------------------------------------|
+| FRM seeds (0x014-0x038)| all 0x0        | 0x11111111 + tables | Linux writes seeds; FRM disabled in both |
+| TCON0_CTL (0x040)      | 0x810001e0     | 0x81000000     | U-Boot: start_delay=0xF, IF mode bits |
+| TCON0_DCLK (0x044)     | 0xf0000004     | 0x80000004     | U-Boot: bits 29:28 extra           |
+| TCON0_BASIC1 (0x04c)   | 0x03470031     | 0x00000000     | U-Boot programs htotal/hbp         |
+| TCON0_BASIC2 (0x050)   | 0x0a500013     | 0x00000000     | U-Boot programs vtotal/vbp         |
+| TCON0_BASIC3 (0x054)   | 0x00090009     | 0x00000000     | U-Boot programs sync widths        |
+| TCON0_HV_IF (0x058)    | 0x00080000     | 0x00000000     | U-Boot sets bit 19 (CCIR CSC dis)  |
+| TCON0_CPU_IF (0x060)   | 0x10000005     | 0x10410005     | Linux has extra BIT(22)            |
+| TCON0_TRI1 (0x164)     | 0x03f404ff     | 0x026b04ff     | block_num differs                  |
+| SAFE_PERIOD (0x1f0)    | 0x00000000     | 0x0bb80003     | Linux sets safe period             |
+
+*** U-Boot vs Linux CCU/DE2 differences
+| Register               | U-Boot         | Linux          | Notes                              |
+|------------------------+----------------+----------------+------------------------------------|
+| PLL_VIDEO0 bit 0       | set (0x...03)  | clear (0x...02)| Unknown function of bit 0          |
+| BUS_DSI gate (0xb4c)   | BIT16+BIT0     | BIT16 only     | Linux doesn't enable DSI bus gate  |
+| DE_CLK (0x600)         | 0x80000001     | 0x81000003     | Different mux/divider              |
+| BLD_PIPE_CTL           | 0x100          | 0x101          | Linux adds FC_EN (bit 0)           |
+| UI1_ATTR               | 0x00000401     | 0xff000401     | Linux sets alpha=0xFF              |
+
+*** Key open question
+All these are expected differences (U-Boot and Linux configure differently). But since
+correct and incorrect Linux boots have identical registers, neither U-Boot nor Linux
+register configuration is the direct cause. The root cause must be in:
+1. Panel internal state (ILI9881C DSI receiver byte alignment)
+2. DSI link synchronization race during init
+3. Internal FIFO/pipeline state not visible in any register
+
 ** Known issue: DRM aggregate teardown memory corruption
 When unbinding the =sun6i-mipi-dsi= platform driver, =component_del= triggers =sun4i_drv_unbind= which tears down the entire DRM device. =drm_fbdev_dma_setup= was called during bind, meaning the kernel fbcon (framebuffer console) is an active consumer. During =drm_dev_unregister=, the fbdev is removed, but fbcon may race with the teardown — it is a kernel-internal consumer unaffected by killing userspace processes. This was observed as a NULL =vm_mm= crash in an unrelated =sshd= process (NULL deref at offset 0x58 in =down_write= from =vma_prepare=, with unsymbolized return address on stack indicating slab/memory corruption). The crash is non-deterministic and may not reproduce on every unbind cycle. Low priority — only affects the unbind/rebind debug workflow, not normal operation.
