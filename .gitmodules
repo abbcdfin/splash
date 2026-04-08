@@ -2,3 +2,9 @@
 	path = u-boot
 	url = git@github.com:sys-in-technologies/u-boot.git
 	branch = vc-mipi-dsi
+[submodule "of_overlay_ctl"]
+	path = of_overlay_ctl
+	url = git@github.com:abbcdfin/of_overlay_ctl.git
+[submodule "dto"]
+	path = dto
+	url = https://github.com/abbcdfin/dto

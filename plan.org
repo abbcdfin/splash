@@ -49,12 +49,11 @@ Failure pattern:
 + Single failure mode: horizontal banding (see =./debug/captures/incorrect0.jpg= and =incorrect1.jpg=);
 + The number of bands and colors vary between occurrences, suggesting a timing-dependent element (e.g., DSI lane skew or D-PHY PLL phase varying per boot);
 
-* Phase 6: Graceful handover display from u-boot to linux system application [PLANNED]
-Sympton:
-+ u-boot displayed splash image correctly before loading linux kernel;
-+ after about 2-3 seconds, during the kernel loading, display got disrupted. It blanked out after 1-2 seconds unstable transition;
-+ kenel kept loading with the blank screen;
-+ after about 30 seconds, screen started showing content after systemed started the application;
+* Phase 6: Graceful handover display from u-boot to linux system application [DONE]
+Achieved a flicker-free transition from U-Boot splash screen to the userspace application.
+- Integrated =simple-framebuffer= into U-Boot and Linux base device trees to maintain display state during kernel boot.
+- Postponed DRM driver initialization by disabling display nodes in the base DTB.
+- Developed a custom kernel module (=of_overlay_ctl.ko=) and userspace tool (=dto=) to apply Device Tree Overlays from userspace.
+- Updated the systemd service to apply the DRM overlay just before launching the splash application, triggering a clean handover.
+- Verified display stability and correct functionality on target hardware.
 
-Target:
-+ We want the transition from u-boot splash screen to application screen to be smooth. Idealy, the u-boot should be displayed uninterrupted until the application takeover;

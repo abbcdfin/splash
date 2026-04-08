@@ -737,62 +737,41 @@ sshpass -p " " ssh root@192.168.13.100 "reboot" &
 sleep 3 && stty -F /dev/ttyUSB0 115200 raw -echo && timeout 90 cat /dev/ttyUSB0
 #+end_src
 
-* 13. Phase 5 Learnings (initramfs / simplefb)
+* 14. Phase 6: Graceful Display Handover
 
-Preserved for reference. Strategy explored in Phase 5: U-Boot cold panel → Linux DRM
-clean init → drm-splash from initramfs. Current approach (Phase 7) has U-Boot
-displaying a splash and Linux inheriting the initialized panel via =panel-skip-init=.
+** 14.1 Simple-Framebuffer (simplefb) Configuration
 
-** 13.1 simplefb Handoff
+To achieve a flicker-free transition from U-Boot splash to Linux application:
+1.  **Node Placement**: The `simple-framebuffer` node should be placed at the **root** of the device tree rather than under `chosen` to avoid address translation issues and ensure consistent kernel binding.
+2.  **Clock Management**:
+    *   Kernel must be built with `CONFIG_FB_SIMPLE=y`.
+    *   The `simple-framebuffer` node must claim all relevant clocks (DE, TCON, DSI, and `CLK_PLL_VIDEO0`) to prevent the Common Clock Framework (CCF) from disabling them as "unused" during boot.
+    *   If CCF still disables clocks, use the kernel command line parameter `clk_ignore_unused`.
+3.  **Regulator Management**: Display-related regulators (AVDD, VCC-DSI, etc.) must be marked `regulator-always-on` in the base device tree to prevent power-down during the handover window.
 
-=sunxi_simplefb_setup()= (=board/sunxi/board.c=) patches the kernel DTB at =booti=
-time to activate the =framebuffer-lcd0= stub. Linux =simplefb= attaches to the live
-U-Boot framebuffer without hardware reconfiguration.
+** 14.2 Postponed Driver Initialization
 
-Required DTS stub in =chosen= node (=status= patched to "okay" at runtime):
-#+begin_src dts
-framebuffer-lcd0 {
-    compatible = "allwinner,simple-framebuffer", "simple-framebuffer";
-    allwinner,pipeline = "mixer0-lcd0";
-    clocks = <&ccu CLK_BUS_DE>, <&ccu CLK_DE>,
-             <&ccu CLK_BUS_TCON_LCD0>, <&ccu CLK_TCON_LCD0>,
-             <&ccu CLK_MIPI_DSI>;
-    status = "disabled";
-};
-#+end_src
+To prevent the full DRM driver from resetting the hardware early in the boot process:
+1.  **Base DTB**: Set all display-related nodes (Mixer, TCON, DSI, PHY, PWM, Backlight) to `status = "disabled"`.
+2.  **Overlay**: Use a Device Tree Overlay (.dtbo) to change these nodes to `status = "okay"` when the userspace application is ready.
 
-⚠️ =ft_board_setup()= is only called during =booti=/=bootm=, not =run bmp-disp=.
+** 14.3 Custom Overlay Manager (of_overlay_ctl)
 
-** 13.2 CONFIG_DRM_SIMPLEDRM Conflict — Do Not Enable
+Mainline Linux kernels (as of v6.10) do not include a standard userspace interface (like `configfs`) for applying DT overlays. A custom solution was implemented:
+1.  **Kernel Module (`of_overlay_ctl.ko`)**: Exposes `/dev/of-overlay-ctl`. It uses the internal `of_overlay_fdt_apply()` API.
+2.  **Userspace Tool (`dto`)**: A subcommand-based utility (`dto apply <file.dtbo>`) that writes overlay data to the device node.
+3.  **DTC Symbols**: The base device tree MUST be compiled with the `-@` flag (enable `__symbols__`) so the overlay resolver can find target phandles. In the kernel build system, this is done by adding `DTC_FLAGS_sun8i-t113s-raft-gw-argon-vb += -@` to the dts Makefile.
 
-With =sun4i-drm=, enabling =CONFIG_DRM_SIMPLEDRM=y= causes a NULL pointer dereference
-in =of_drm_find_panel= during =sun6i_dsi_attach=. Root cause: two DRM drivers bind
-simultaneously; =drm_aperture_remove_conflicting_framebuffers()= corrupts the panel
-list mid-probe. Use =CONFIG_FB=y= + =CONFIG_FB_SIMPLE=y= (legacy fbdev) instead.
+** 14.4 Handover Sequence
 
-** 13.3 drm-splash Binary
+#+begin_example
+1. U-Boot: Initialize hardware, show splash, inject simplefb node.
+2. Kernel Boot: Bind to simplefb, keep clocks/regulators on, display remains stable.
+3. systemd: Launch drm-splash.service.
+4. drm-splash.service:
+   a. insmod of_overlay_ctl.ko
+   b. dto apply sun8i-t113s-raft-gw-argon-vb-drm.dtbo (triggers DRM probe)
+   c. wait for /dev/dri/card0
+   d. launch drm-splash (application takes over display)
+#+end_example
 
-Static ARM binary (855 KB): =drm-splash/dist/usr/bin/drm-splash=.
-Opens =/dev/dri/card0=, allocates XRGB8888 dumb buffer, blits BMP/SPLR image,
-calls =drmModeSetCrtc=, drops DRM master, blocks on SIGTERM.
-
-** 13.4 Initramfs Overlay Technique
-
-#+begin_src bash
-(zcat openwrt.cpio.gz; cat overlay.cpio) | gzip -9 > combined.cpio.gz
-#+end_src
-
-Kernel processes concatenated cpio streams in order; later entries override earlier.
-Embedding combined (~4.9 MB) via =CONFIG_INITRAMFS_SOURCE= produces a ~13 MB =zImage=
-that fails to boot — keep initramfs external or use the FAT hook instead.
-
-** 13.5 FAT Hook Deployment (No Kernel Rebuild)
-
-The OpenWrt =/init= mounts =mmcblk0p4= (FAT) and =exec='s =/media/boot/init.sh= if
-its MD5 matches =md5.txt=. Use to inject drm-splash without a kernel rebuild:
-1. Copy =drm-splash= binary and =splash.bmp= to FAT partition.
-2. Write =init.sh=: mount devtmpfs, poll =/dev/dri/card0=, launch drm-splash, exec =/sbin/init=.
-3. Write =md5.txt= of =init.sh=.
-
-Busybox =sleep= accepts integer seconds only (=sleep 0.1= fails — use counter loop).
-=devtmpfs= must be mounted explicitly; OpenWrt =auot_dev= does not mount it.
