@@ -57,3 +57,8 @@ Achieved a flicker-free transition from U-Boot splash screen to the userspace ap
 - Updated the systemd service to apply the DRM overlay just before launching the splash application, triggering a clean handover.
 - Verified display stability and correct functionality on target hardware.
 
+* Phase 7: Smooth Display Transitions [DONE]
+Achieved a flicker-free boot experience by managing the backlight state during critical transitions.
+- U-Boot: Modified =sunxi_lcd.c= and =video_bmp.c= to defer backlight activation until the first splash frame is fully drawn. Added =backlight_auto_on= environment variable support and enabled =CONFIG_NO_FB_CLEAR= to prevent intermediate flashes.
+- Linux: Updated =drm-splash.service= to turn OFF the backlight before applying the DRM overlay and turn it back ON only after the Linux splash application has started rendering. This hides the hardware re-initialization glitch during the DRM probe.
+
