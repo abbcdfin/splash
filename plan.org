@@ -62,3 +62,11 @@ Achieved a flicker-free boot experience by managing the backlight state during c
 - U-Boot: Modified =sunxi_lcd.c= and =video_bmp.c= to defer backlight activation until the first splash frame is fully drawn. Added =backlight_auto_on= environment variable support and enabled =CONFIG_NO_FB_CLEAR= to prevent intermediate flashes.
 - Linux: Updated =drm-splash.service= to turn OFF the backlight before applying the DRM overlay and turn it back ON only after the Linux splash application has started rendering. This hides the hardware re-initialization glitch during the DRM probe.
 
+* Phase 8: Framebuffer-Based Splash (DRM-free) [DONE]
+Created =fb-splash= as a DRM-free alternative to =drm-splash=, rendering directly to the =simple-framebuffer= device exposed by =simplefb=.
+- Implemented =fb-splash/fb-splash.c=: reads framebuffer geometry and pixel format via =FBIOGET_VSCREENINFO=/=FBIOGET_FSCREENINFO=, maps =/dev/fb0= with =mmap=, blits a centred image, then holds display until =SIGTERM=.
+- Supports =SPLR= and =BMP= (24/32-bit) input formats; fast-path row =memcpy= for =x8r8g8b8= (the format reported by =simplefb= on this board), generic per-pixel converter for other depths.
+- Build system: =CMakeLists.txt= + =cmake/armv7-toolchain.cmake= using the OE =arm-none-linux-gnueabihf-gcc= toolchain; no external library dependencies; =build.sh= sources =setup-oe.sh= directly.
+- Added =systemd/fb-splash.service=; =DT overlay= and =/dev/dri/card0= wait are no longer needed.
+- Note: to adopt this approach, backlight/PWM nodes must be moved from the DRM overlay into the base DTB so the kernel backlight driver probes at boot.
+

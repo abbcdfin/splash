@@ -1,0 +1,18 @@
+[Unit]
+Description=Framebuffer Splash Screen
+DefaultDependencies=no
+After=local-fs.target
+
+[Service]
+Type=simple
+ExecStartPre=/bin/sh -c 'until [ -e /dev/fb0 ]; do sleep 0.1; done'
+ExecStart=/usr/bin/fb-splash /usr/share/fb-splash/splash.bmp
+ExecStop=/bin/kill -TERM $MAINPID
+KillSignal=SIGTERM
+TimeoutStopSec=2
+TimeoutStartSec=10
+Restart=no
+SupplementaryGroups=video
+
+[Install]
+WantedBy=basic.target
